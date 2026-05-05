@@ -1,0 +1,37 @@
+services:
+  surrealdb:
+    image: surrealdb/surrealdb:v2.1.4
+    command:
+      - start
+      - --user=root
+      - --pass=root
+      - --bind=0.0.0.0:8000
+      - rocksdb:/data/db
+    ports:
+      - "8000:8000"
+    volumes:
+      - surrealdb-data:/data/db
+    healthcheck:
+      test: ["CMD", "/surreal", "is-ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  brain:
+    build: .
+    depends_on:
+      surrealdb:
+        condition: service_healthy
+    environment:
+      - PORT=3000
+      - SURREALDB_URL=ws://surrealdb:8000
+      - SURREALDB_USERNAME=root
+      - SURREALDB_PASSWORD=root
+      - SURREALDB_NAMESPACE=brain
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - BRAIN_API_KEYS=${BRAIN_API_KEYS:-[]}
+    ports:
+      - "3000:3000"
+
+volumes:
+  surrealdb-data:
