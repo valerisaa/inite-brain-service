@@ -61,6 +61,50 @@ describe('MetricsService', () => {
     expect(contentType).toMatch(/text\/plain.*version=0\.0\.4/);
   });
 
+  it('records OpenAI call counters, durations, and tokens', async () => {
+    metrics.recordOpenAiCall({
+      kind: 'embed',
+      outcome: 'ok',
+      durationSeconds: 0.4,
+      promptTokens: 12,
+      completionTokens: 0,
+    });
+    metrics.recordOpenAiCall({
+      kind: 'chat',
+      outcome: 'ok',
+      durationSeconds: 1.7,
+      promptTokens: 320,
+      completionTokens: 88,
+    });
+    metrics.recordOpenAiCall({
+      kind: 'chat',
+      outcome: 'error',
+      durationSeconds: 5.2,
+    });
+
+    const { body } = await metrics.serialize();
+    expect(body).toMatch(/brain_openai_calls_total\{kind="embed",outcome="ok"\} 1/);
+    expect(body).toMatch(/brain_openai_calls_total\{kind="chat",outcome="ok"\} 1/);
+    expect(body).toMatch(/brain_openai_calls_total\{kind="chat",outcome="error"\} 1/);
+    expect(body).toMatch(/brain_openai_tokens_total\{kind="embed",type="prompt"\} 12/);
+    expect(body).toMatch(/brain_openai_tokens_total\{kind="chat",type="prompt"\} 320/);
+    expect(body).toMatch(/brain_openai_tokens_total\{kind="chat",type="completion"\} 88/);
+    // Histogram observations recorded
+    expect(body).toMatch(/brain_openai_call_duration_seconds_count\{kind="embed"\} 1/);
+    expect(body).toMatch(/brain_openai_call_duration_seconds_count\{kind="chat"\} 2/);
+  });
+
+  it('does not emit a token counter when count is 0 or undefined', async () => {
+    metrics.recordOpenAiCall({
+      kind: 'embed',
+      outcome: 'ok',
+      durationSeconds: 0.1,
+      promptTokens: 0,
+    });
+    const { body } = await metrics.serialize();
+    expect(body).not.toMatch(/brain_openai_tokens_total\{[^}]*kind="embed"/);
+  });
+
   it('counts ingest mention results', async () => {
     metrics.countIngestMention('extracted');
     metrics.countIngestMention('skipped');

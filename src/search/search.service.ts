@@ -43,9 +43,12 @@ interface FactRow {
     externalRefs?: Record<string, string>;
   };
   // One of these is set per row depending on which leg surfaced it;
-  // hybrid mode merges both and lets RRF fuse.
-  vec?: number;
-  lex?: number;
+  // hybrid mode merges both and lets RRF fuse. Field names sidestep the
+  // SurrealQL `vec::*` and `lex::*` namespace prefixes — using `vec` or
+  // `lex` as a SELECT alias confuses the parser's `ORDER BY` resolver
+  // and silently returns rows in record-id order instead of by score.
+  simScore?: number;
+  bm25Score?: number;
 }
 
 // Reciprocal-rank fusion constant. 60 is the canonical default from the
@@ -90,6 +93,10 @@ export class SearchService {
         mode === 'lexical' ? Promise.resolve([] as FactRow[]) : this.vectorLeg(db, dto.query, candidateK, baseWhere),
         mode === 'vector' ? Promise.resolve([] as FactRow[]) : this.lexicalLeg(db, dto.query, candidateK, baseWhere),
       ]);
+      // eslint-disable-next-line no-console
+      console.log('[search debug] mode=', mode, 'vec.len=', vectorRows.length, 'lex.len=', lexicalRows.length);
+      if (vectorRows[0]) console.log('[search debug] vec[0]=', JSON.stringify(vectorRows[0]).slice(0, 400));
+      if (lexicalRows[0]) console.log('[search debug] lex[0]=', JSON.stringify(lexicalRows[0]).slice(0, 400));
 
       // Fuse — vector and lexical lists are joined by fact id; the
       // resulting per-fact score is RRF(vector_rank, lexical_rank)
@@ -173,11 +180,14 @@ export class SearchService {
   // ── Retrieval legs ───────────────────────────────────────────────
 
   /**
-   * Vector leg — cosine similarity over `embedding`. Uses FETCH on
-   * entityId so the response carries the entity record inline,
-   * avoiding the separate hydration query the prior implementation
-   * needed. We do an explicit full-scan here (no HNSW yet — see
-   * schema comment); the LIMIT bound caps work to candidateK.
+   * Vector leg — cosine similarity over `embedding`. The inline
+   * projection `entityId.{...} AS entity` reads the linked entity
+   * record in the same query, so no separate hydration round-trip is
+   * needed. We deliberately don't add `FETCH entityId` — that would
+   * overwrite the `entityId` field in-place with the entity object,
+   * breaking `String(row.entityId)` for the grouping pass below.
+   * The inline-projection form keeps `entityId` as a record link
+   * AND surfaces `entity` as a hydrated record.
    */
   private async vectorLeg(
     db: Surreal,
@@ -191,13 +201,12 @@ export class SearchService {
         id, entityId, predicate, object, confidence,
         validFrom, validUntil, recordedAt, retractedAt, status, source,
         entityId.{id, type, canonicalName, externalRefs} AS entity,
-        vector::similarity::cosine(embedding, $q) AS vec
+        vector::similarity::cosine(embedding, $q) AS simScore
       FROM knowledge_fact
       WHERE embedding != NONE
         ${baseWhere.sql}
-      ORDER BY vec DESC
+      ORDER BY simScore DESC
       LIMIT $k
-      FETCH entityId
     `;
     const [rows] = await db.query<[FactRow[]]>(sql, {
       ...baseWhere.params,
@@ -226,13 +235,12 @@ export class SearchService {
         id, entityId, predicate, object, confidence,
         validFrom, validUntil, recordedAt, retractedAt, status, source,
         entityId.{id, type, canonicalName, externalRefs} AS entity,
-        search::score(1) AS lex
+        search::score(1) AS bm25Score
       FROM knowledge_fact
       WHERE object @1@ $query
         ${baseWhere.sql}
-      ORDER BY lex DESC
+      ORDER BY bm25Score DESC
       LIMIT $k
-      FETCH entityId
     `;
     try {
       const [rows] = await db.query<[FactRow[]]>(sql, {

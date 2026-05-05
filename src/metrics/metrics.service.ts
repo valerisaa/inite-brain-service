@@ -19,6 +19,9 @@ import {
  *   - search_duration_seconds                 — histogram, buckets tuned for ~ms-to-1s
  *   - retract_total / forget_total            — counters
  *   - compaction_facts_total                  — counter, summed across tenants
+ *   - openai_tokens_total{kind, type}         — embed|chat × prompt|completion
+ *   - openai_calls_total{kind, outcome}       — embed|chat × ok|error
+ *   - openai_call_duration_seconds{kind}      — histogram per kind
  *
  * No `companyId` label — that would be unbounded cardinality. Per-tenant
  * dashboards are built off log lines (which carry companyId) instead.
@@ -66,6 +69,28 @@ export class MetricsService implements OnModuleInit {
     registers: [this.registry],
   });
 
+  readonly openaiTokens = new Counter({
+    name: 'brain_openai_tokens_total',
+    help: 'OpenAI tokens consumed, by call kind and token type',
+    labelNames: ['kind', 'type'] as const,
+    registers: [this.registry],
+  });
+
+  readonly openaiCalls = new Counter({
+    name: 'brain_openai_calls_total',
+    help: 'OpenAI API calls by kind and outcome',
+    labelNames: ['kind', 'outcome'] as const,
+    registers: [this.registry],
+  });
+
+  readonly openaiCallDuration = new Histogram({
+    name: 'brain_openai_call_duration_seconds',
+    help: 'OpenAI API call latency in seconds, by kind',
+    labelNames: ['kind'] as const,
+    buckets: [0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 30],
+    registers: [this.registry],
+  });
+
   onModuleInit() {
     // Node defaults: GC, event-loop lag, memory, CPU. Cheap and useful.
     collectDefaultMetrics({ register: this.registry, prefix: 'brain_' });
@@ -93,6 +118,39 @@ export class MetricsService implements OnModuleInit {
 
   countCompacted(n: number): void {
     if (n > 0) this.compactionFacts.inc(n);
+  }
+
+  /**
+   * Record an OpenAI call. Pass token counts as reported by the SDK
+   * (`response.usage.prompt_tokens` / `completion_tokens`). For embeddings
+   * the API returns `prompt_tokens` only; pass 0 for completion.
+   */
+  recordOpenAiCall(args: {
+    kind: 'embed' | 'chat';
+    outcome: 'ok' | 'error';
+    durationSeconds: number;
+    promptTokens?: number;
+    completionTokens?: number;
+  }): void {
+    this.openaiCalls.inc({ kind: args.kind, outcome: args.outcome } as LabelValues<
+      'kind' | 'outcome'
+    >);
+    this.openaiCallDuration.observe(
+      { kind: args.kind } as LabelValues<'kind'>,
+      args.durationSeconds,
+    );
+    if (args.promptTokens && args.promptTokens > 0) {
+      this.openaiTokens.inc(
+        { kind: args.kind, type: 'prompt' } as LabelValues<'kind' | 'type'>,
+        args.promptTokens,
+      );
+    }
+    if (args.completionTokens && args.completionTokens > 0) {
+      this.openaiTokens.inc(
+        { kind: args.kind, type: 'completion' } as LabelValues<'kind' | 'type'>,
+        args.completionTokens,
+      );
+    }
   }
 
   async serialize(): Promise<{ contentType: string; body: string }> {

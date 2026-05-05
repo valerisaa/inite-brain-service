@@ -1,8 +1,8 @@
 import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Surreal } from 'surrealdb';
-import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { SchemaMigrator } from './migrator.service';
 
 /**
  * SurrealService — pooled connections with per-tenant database routing.
@@ -32,9 +32,11 @@ export class SurrealService implements OnModuleInit, OnModuleDestroy {
   // this chain. SurrealDB raises transaction read-conflicts when multiple
   // tenants concurrently CREATE DATABASE + DEFINE on shared metadata.
   private schemaQueue: Promise<unknown> = Promise.resolve();
-  private cachedSchemaSql: string | null = null;
+  private readonly migrator: SchemaMigrator;
 
-  constructor(private readonly configService: ConfigService) {}
+  constructor(private readonly configService: ConfigService) {
+    this.migrator = new SchemaMigrator(join(__dirname, 'migrations'));
+  }
 
   async onModuleInit() {
     const url = this.configService.getOrThrow<string>('SURREALDB_URL');
@@ -147,20 +149,22 @@ export class SurrealService implements OnModuleInit, OnModuleDestroy {
       // Recheck under the queue: another request may have applied schema
       // for this database while we were waiting.
       if (this.knownDatabases.has(database)) return;
-      await this.applySchemaQuery(conn);
+      const result = await this.migrator.migrate(conn);
       this.knownDatabases.add(database);
-      this.logger.log(`Schema applied to ${this.namespace}/${database}`);
+      if (result.applied.length > 0) {
+        this.logger.log(
+          `Migrated ${this.namespace}/${database}: applied [${result.applied.join(', ')}], ` +
+            `already-applied [${result.alreadyApplied.join(', ') || '-'}]`,
+        );
+      } else {
+        this.logger.log(
+          `Schema up-to-date for ${this.namespace}/${database} ` +
+            `(${result.alreadyApplied.length} migration(s) applied)`,
+        );
+      }
     });
     this.schemaQueue = next.catch(() => undefined);
     await next;
-  }
-
-  private async applySchemaQuery(conn: Surreal) {
-    if (this.cachedSchemaSql === null) {
-      const schemaPath = join(__dirname, 'schema.surql');
-      this.cachedSchemaSql = await readFile(schemaPath, 'utf-8');
-    }
-    await conn.query(this.cachedSchemaSql);
   }
 }
 

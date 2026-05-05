@@ -8,6 +8,10 @@
       {
         "include": "db/schema.surql",
         "outDir": "dist"
+      },
+      {
+        "include": "db/migrations/*.surql",
+        "outDir": "dist"
       }
     ]
   }

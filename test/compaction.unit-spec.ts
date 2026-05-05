@@ -1,9 +1,14 @@
 /**
- * Unit-test for CompactionService. Mocks SurrealService and ApiKeyService
- * to verify retention math, multi-tenant fan-out, and error isolation.
+ * Unit-test for CompactionService. Mocks SurrealService, ApiKeyService,
+ * and the SummaryGenerator to verify retention math, multi-tenant fan-out,
+ * error isolation, and the optional summary leg.
  */
 import { ConfigService } from '@nestjs/config';
 import { CompactionService } from '../src/compaction/compaction.service';
+import type {
+  FactToSummarize,
+  SummaryGenerator,
+} from '../src/compaction/summary-generator';
 import type { ApiKeyService } from '../src/auth/api-key.service';
 import type { SurrealService } from '../src/db/surreal.service';
 
@@ -21,24 +26,47 @@ class StubConfig {
 
 interface QueryCall {
   sql: string;
-  params: Record<string, unknown> | undefined;
+  params?: Record<string, unknown>;
 }
 
-function makeFakeSurreal(byTenant: Record<string, { count: number; updateError?: Error }>) {
+interface CandidateRow {
+  id: string;
+  entityId: string;
+  predicate: string;
+  object: string;
+  validFrom: string;
+  validUntil?: string;
+  confidence: number;
+}
+
+interface TenantSeed {
+  rows: CandidateRow[];
+  updateError?: Error;
+}
+
+function makeFakeSurreal(byTenant: Record<string, TenantSeed>) {
   const calls: Array<{ companyId: string; calls: QueryCall[] }> = [];
+  const created: Array<{ companyId: string; payload: Record<string, unknown> }> = [];
+
   const surreal = {
     async withCompany<T>(companyId: string, fn: (db: unknown) => Promise<T>): Promise<T> {
       const log: QueryCall[] = [];
-      const tenant = byTenant[companyId];
+      const tenant = byTenant[companyId] ?? { rows: [] };
       const fakeDb = {
         async query<R>(sql: string, params?: Record<string, unknown>): Promise<R> {
           log.push({ sql, params });
-          if (sql.startsWith('SELECT count()')) {
-            return [[{ count: tenant?.count ?? 0 }]] as unknown as R;
+          if (sql.includes('SELECT id, entityId, predicate')) {
+            return [tenant.rows] as unknown as R;
           }
           if (sql.startsWith('UPDATE')) {
-            if (tenant?.updateError) throw tenant.updateError;
+            if (tenant.updateError) throw tenant.updateError;
             return [[]] as unknown as R;
+          }
+          if (sql.startsWith('CREATE type::table($t)')) {
+            // dbCreate helper signature
+            const data = params!.d as Record<string, unknown>;
+            created.push({ companyId, payload: data });
+            return [[{ ...data, id: `synthetic_${created.length}` }]] as unknown as R;
           }
           return [[]] as unknown as R;
         },
@@ -48,7 +76,7 @@ function makeFakeSurreal(byTenant: Record<string, { count: number; updateError?:
       return out;
     },
   } as unknown as SurrealService;
-  return { surreal, calls };
+  return { surreal, calls, created };
 }
 
 function makeApiKeys(companyIds: string[]): ApiKeyService {
@@ -57,46 +85,23 @@ function makeApiKeys(companyIds: string[]): ApiKeyService {
   } as unknown as ApiKeyService;
 }
 
-describe('CompactionService', () => {
+function rows(specs: Array<Partial<CandidateRow> & { id: string }>): CandidateRow[] {
+  return specs.map((s, i) => ({
+    entityId: 'knowledge_entity:e1',
+    predicate: 'tier',
+    object: `value_${i}`,
+    validFrom: `2025-${String(i % 12 + 1).padStart(2, '0')}-01T00:00:00Z`,
+    confidence: 0.8,
+    ...s,
+  }));
+}
+
+describe('CompactionService — mark + drop (default mode)', () => {
   it('compacts each tenant once and returns per-tenant counts', async () => {
     const { surreal, calls } = makeFakeSurreal({
-      co_a: { count: 12 },
-      co_b: { count: 0 },
-      co_c: { count: 5 },
-    });
-    const apiKeys = makeApiKeys(['co_a', 'co_b', 'co_c']);
-    const service = new CompactionService(
-      surreal,
-      apiKeys,
-      new StubConfig() as unknown as ConfigService,
-    );
-
-    const stats = await service.compactAll();
-
-    expect(stats).toHaveLength(3);
-    const byTenant = Object.fromEntries(stats.map((s) => [s.companyId, s]));
-    expect(byTenant.co_a.factsCompacted).toBe(12);
-    expect(byTenant.co_b.factsCompacted).toBe(0);
-    expect(byTenant.co_c.factsCompacted).toBe(5);
-
-    // Bytes-freed estimate: 6 KiB per fact
-    expect(byTenant.co_a.bytesFreed).toBe(12 * 6 * 1024);
-    expect(byTenant.co_b.bytesFreed).toBe(0);
-
-    // Tenant with zero matches must NOT issue an UPDATE
-    const calls_b = calls.find((c) => c.companyId === 'co_b')!;
-    expect(calls_b.calls.some((c) => c.sql.startsWith('UPDATE'))).toBe(false);
-
-    // Tenant with matches issues exactly one UPDATE
-    const calls_a = calls.find((c) => c.companyId === 'co_a')!;
-    expect(calls_a.calls.filter((c) => c.sql.startsWith('UPDATE'))).toHaveLength(1);
-  });
-
-  it('isolates per-tenant failures — one bad tenant does not abort the rest', async () => {
-    const { surreal } = makeFakeSurreal({
-      co_a: { count: 3 },
-      co_b: { count: 7, updateError: new Error('surreal exploded') },
-      co_c: { count: 4 },
+      co_a: { rows: rows(Array.from({ length: 12 }, (_, i) => ({ id: `f${i}` }))) },
+      co_b: { rows: [] },
+      co_c: { rows: rows(Array.from({ length: 5 }, (_, i) => ({ id: `g${i}` }))) },
     });
     const service = new CompactionService(
       surreal,
@@ -105,30 +110,57 @@ describe('CompactionService', () => {
     );
 
     const stats = await service.compactAll();
-    // co_b's compaction threw; the result list must still include co_a + co_c
+    expect(stats).toHaveLength(3);
+    const byTenant = Object.fromEntries(stats.map((s) => [s.companyId, s]));
+    expect(byTenant.co_a.factsCompacted).toBe(12);
+    expect(byTenant.co_b.factsCompacted).toBe(0);
+    expect(byTenant.co_c.factsCompacted).toBe(5);
+    expect(byTenant.co_a.summariesCreated).toBe(0); // summaries off by default
+    expect(byTenant.co_a.bytesFreed).toBe(12 * 6 * 1024);
+
+    const calls_b = calls.find((c) => c.companyId === 'co_b')!;
+    expect(calls_b.calls.some((c) => c.sql.startsWith('UPDATE'))).toBe(false);
+
+    const calls_a = calls.find((c) => c.companyId === 'co_a')!;
+    expect(calls_a.calls.filter((c) => c.sql.startsWith('UPDATE'))).toHaveLength(1);
+  });
+
+  it('isolates per-tenant failures', async () => {
+    const { surreal } = makeFakeSurreal({
+      co_a: { rows: rows([{ id: 'f1' }, { id: 'f2' }, { id: 'f3' }]) },
+      co_b: {
+        rows: rows([{ id: 'g1' }, { id: 'g2' }]),
+        updateError: new Error('surreal exploded'),
+      },
+      co_c: { rows: rows([{ id: 'h1' }, { id: 'h2' }]) },
+    });
+    const service = new CompactionService(
+      surreal,
+      makeApiKeys(['co_a', 'co_b', 'co_c']),
+      new StubConfig() as unknown as ConfigService,
+    );
+
+    const stats = await service.compactAll();
     expect(stats.map((s) => s.companyId).sort()).toEqual(['co_a', 'co_c']);
   });
 
   it('honours COMPACTION_HOT_RETENTION_DAYS env override', async () => {
-    const { surreal, calls } = makeFakeSurreal({ co_a: { count: 1 } });
+    const { surreal, calls } = makeFakeSurreal({ co_a: { rows: rows([{ id: 'f1' }]) } });
     const service = new CompactionService(
       surreal,
       makeApiKeys(['co_a']),
-      new StubConfig({
-        COMPACTION_HOT_RETENTION_DAYS: '30',
-      }) as unknown as ConfigService,
+      new StubConfig({ COMPACTION_HOT_RETENTION_DAYS: '30' }) as unknown as ConfigService,
     );
 
     const before = Date.now();
     await service.compactCompany('co_a');
     const after = Date.now();
 
-    const cutoff = calls[0].calls[0].params!.cutoff as string;
+    const select = calls[0].calls.find((c) => c.sql.includes('SELECT id, entityId'))!;
+    const cutoff = select.params!.cutoff as string;
     const cutoffMs = Date.parse(cutoff);
-    const expectedMin = before - 30 * 24 * 60 * 60 * 1000;
-    const expectedMax = after - 30 * 24 * 60 * 60 * 1000;
-    expect(cutoffMs).toBeGreaterThanOrEqual(expectedMin);
-    expect(cutoffMs).toBeLessThanOrEqual(expectedMax);
+    expect(cutoffMs).toBeGreaterThanOrEqual(before - 30 * 24 * 60 * 60 * 1000);
+    expect(cutoffMs).toBeLessThanOrEqual(after - 30 * 24 * 60 * 60 * 1000);
   });
 
   it('rejects invalid retention config at construction', () => {
@@ -139,9 +171,7 @@ describe('CompactionService', () => {
         new CompactionService(
           surreal,
           apiKeys,
-          new StubConfig({
-            COMPACTION_HOT_RETENTION_DAYS: '0',
-          }) as unknown as ConfigService,
+          new StubConfig({ COMPACTION_HOT_RETENTION_DAYS: '0' }) as unknown as ConfigService,
         ),
     ).toThrow(/positive integer/);
     expect(
@@ -149,25 +179,132 @@ describe('CompactionService', () => {
         new CompactionService(
           surreal,
           apiKeys,
-          new StubConfig({
-            COMPACTION_HOT_RETENTION_DAYS: 'abc',
-          }) as unknown as ConfigService,
+          new StubConfig({ COMPACTION_HOT_RETENTION_DAYS: 'abc' }) as unknown as ConfigService,
         ),
     ).toThrow(/positive integer/);
   });
+});
 
-  it('passes cutoff as ISO string to Surreal d-prefixed param', async () => {
-    const { surreal, calls } = makeFakeSurreal({ co_a: { count: 2 } });
+describe('CompactionService — summary mode (COMPACTION_SUMMARIES=true)', () => {
+  class StubGenerator implements SummaryGenerator {
+    public calls: FactToSummarize[][] = [];
+    constructor(private readonly text: (g: FactToSummarize[]) => string) {}
+    async generate(group: FactToSummarize[]): Promise<string> {
+      this.calls.push(group);
+      return this.text(group);
+    }
+  }
+
+  it('creates one summary fact per (entityId, predicate) group of >= 2', async () => {
+    const { surreal, calls, created } = makeFakeSurreal({
+      co_a: {
+        rows: rows([
+          { id: 'fact:1', entityId: 'knowledge_entity:e1', predicate: 'tier', object: 'gold', validFrom: '2025-01-01T00:00:00Z' },
+          { id: 'fact:2', entityId: 'knowledge_entity:e1', predicate: 'tier', object: 'platinum', validFrom: '2025-04-01T00:00:00Z' },
+          { id: 'fact:3', entityId: 'knowledge_entity:e1', predicate: 'tier', object: 'diamond', validFrom: '2025-07-01T00:00:00Z' },
+          { id: 'fact:4', entityId: 'knowledge_entity:e2', predicate: 'name', object: 'Anna', validFrom: '2025-01-15T00:00:00Z' },
+          // Singleton group — should NOT produce a summary
+          { id: 'fact:5', entityId: 'knowledge_entity:e3', predicate: 'lifetime_orders', object: '4', validFrom: '2025-02-01T00:00:00Z' },
+        ]),
+      },
+    });
+    const gen = new StubGenerator((g) => `SUMMARY(${g.length}:${g.map((f) => f.object).join(',')})`);
+
     const service = new CompactionService(
       surreal,
       makeApiKeys(['co_a']),
-      new StubConfig() as unknown as ConfigService,
+      new StubConfig({ COMPACTION_SUMMARIES: 'true' }) as unknown as ConfigService,
+      undefined,
+      gen,
     );
 
-    await service.compactCompany('co_a');
-    const select = calls[0].calls.find((c) => c.sql.includes('SELECT count()'))!;
-    expect(select.sql).toContain('d$cutoff');
-    expect(typeof select.params!.cutoff).toBe('string');
-    expect(select.params!.cutoff as string).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    const [stats] = await service.compactAll();
+    expect(stats.factsCompacted).toBe(5);
+    // Two summaries: tier (3 rows) + name (1 row) — name is singleton, skip
+    expect(stats.summariesCreated).toBe(1);
+    expect(gen.calls).toHaveLength(1);
+    expect(gen.calls[0].map((f) => f.object)).toEqual(['gold', 'platinum', 'diamond']);
+
+    expect(created).toHaveLength(1);
+    const summary = created[0].payload as Record<string, unknown>;
+    expect(summary.predicate).toBe('summary_tier');
+    expect(summary.object).toBe('SUMMARY(3:gold,platinum,diamond)');
+    expect((summary.derivedFrom as unknown[]).length).toBe(3);
+    expect(summary.validFrom).toBe('2025-01-01T00:00:00Z');
+    expect(summary.confidence).toBeCloseTo(0.8, 5);
+    expect(summary.status).toBe('active');
+
+    const updates = calls[0].calls.filter((c) => c.sql.startsWith('UPDATE'));
+    expect(updates).toHaveLength(1);
+  });
+
+  it('skips summary creation when generator returns empty string', async () => {
+    const { surreal, created } = makeFakeSurreal({
+      co_a: {
+        rows: rows([
+          { id: 'fact:1', entityId: 'knowledge_entity:e1', predicate: 'tier', object: 'gold' },
+          { id: 'fact:2', entityId: 'knowledge_entity:e1', predicate: 'tier', object: 'platinum' },
+        ]),
+      },
+    });
+    const emptyGen: SummaryGenerator = { generate: async () => '' };
+    const service = new CompactionService(
+      surreal,
+      makeApiKeys(['co_a']),
+      new StubConfig({ COMPACTION_SUMMARIES: 'true' }) as unknown as ConfigService,
+      undefined,
+      emptyGen,
+    );
+    const [stats] = await service.compactAll();
+    expect(stats.factsCompacted).toBe(2);
+    expect(stats.summariesCreated).toBe(0);
+    expect(created).toHaveLength(0);
+  });
+
+  it('does not create summaries when COMPACTION_SUMMARIES is false', async () => {
+    const { surreal, created } = makeFakeSurreal({
+      co_a: {
+        rows: rows([
+          { id: 'fact:1', entityId: 'knowledge_entity:e1', predicate: 'tier', object: 'gold' },
+          { id: 'fact:2', entityId: 'knowledge_entity:e1', predicate: 'tier', object: 'platinum' },
+        ]),
+      },
+    });
+    const gen = new StubGenerator(() => 'should-not-run');
+    const service = new CompactionService(
+      surreal,
+      makeApiKeys(['co_a']),
+      new StubConfig() as unknown as ConfigService, // default = false
+      undefined,
+      gen,
+    );
+    const [stats] = await service.compactAll();
+    expect(stats.factsCompacted).toBe(2);
+    expect(stats.summariesCreated).toBe(0);
+    expect(gen.calls).toHaveLength(0);
+    expect(created).toHaveLength(0);
+  });
+});
+
+describe('ConcatSummaryGenerator', () => {
+  it('produces a chronological concat with date prefix and predicate', async () => {
+    const { ConcatSummaryGenerator } = await import('../src/compaction/summary-generator');
+    const gen = new ConcatSummaryGenerator();
+    const text = await gen.generate([
+      { factId: 'a', predicate: 'tier', object: 'gold', validFrom: '2025-01-15T00:00:00Z', confidence: 0.9 },
+      { factId: 'b', predicate: 'tier', object: 'platinum', validFrom: '2025-04-01T00:00:00Z', confidence: 0.95 },
+    ]);
+    expect(text).toBe('[2025-01-15] tier: gold | [2025-04-01] tier: platinum');
+  });
+
+  it('truncates very long output to 8000 chars', async () => {
+    const { ConcatSummaryGenerator } = await import('../src/compaction/summary-generator');
+    const gen = new ConcatSummaryGenerator();
+    const big = 'x'.repeat(10_000);
+    const text = await gen.generate([
+      { factId: 'a', predicate: 'note', object: big, validFrom: '2025-01-15T00:00:00Z', confidence: 0.9 },
+    ]);
+    expect(text.length).toBe(8_000);
+    expect(text.endsWith('...')).toBe(true);
   });
 });
