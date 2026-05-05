@@ -281,25 +281,66 @@ export function isUniqueViolation(err: unknown): boolean {
 }
 
 /**
- * Retry a body once on a unique-index violation. The pattern is:
- * SELECT-then-CREATE; if a concurrent caller created the row between
- * our SELECT and CREATE, the CREATE raises a unique violation. We
- * re-run `fn`, which on its second SELECT will find the row created
- * by the racing caller and short-circuit. Two retries are enough —
- * a third collision under sub-millisecond contention indicates a real
- * bug, not a race.
+ * Detect SurrealDB optimistic-concurrency read conflict. Surreal's
+ * datastore aborts a transaction whose read-set was invalidated by a
+ * concurrent committer. The surfaced messages cluster into:
+ *
+ *   - "Transaction read conflict" — explicit OCC abort
+ *   - "failed transaction" — composed multi-statement CANCEL after one
+ *     statement aborted (the underlying cause is the previous one in
+ *     the result set, but the surfaced top-level message is generic)
+ *   - "transaction wrote at the same key" / "datastore transaction"
+ *     — variants from the rocksdb engine for write-write contention
+ *
+ * All are retriable from the caller's perspective: re-running the
+ * same logic against the now-updated state either succeeds, returns
+ * the racing-caller's row on read, or surfaces a unique violation
+ * (which `isUniqueViolation` then catches).
+ */
+export function isReadConflict(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  const m = err.message;
+  return (
+    m.includes('Transaction read conflict') ||
+    m.includes('failed transaction') ||
+    m.includes('datastore transaction') ||
+    m.includes('wrote at the same key')
+  );
+}
+
+/**
+ * Retry a body on transient concurrency failures: unique-index
+ * violations OR optimistic-concurrency read conflicts. Both arise
+ * from the same SELECT-then-CREATE race window — under contention,
+ * one tx commits and others either (a) see a duplicate index entry
+ * (unique violation) or (b) have their read-set invalidated (read
+ * conflict). Both are retriable: re-run the closure, which on its
+ * second SELECT will see the racing caller's commit and either
+ * short-circuit (read path) or write fresh state (rare).
+ *
+ * We use exponential backoff with jitter so a herd of FANOUT
+ * retries doesn't synchronise into a second collision wave.
  */
 export async function retryOnUniqueViolation<T>(
   fn: () => Promise<T>,
-  attempts = 3,
+  attempts = 8,
 ): Promise<T> {
   let lastErr: unknown;
   for (let i = 0; i < attempts; i++) {
     try {
       return await fn();
     } catch (err) {
-      if (!isUniqueViolation(err)) throw err;
+      if (!isUniqueViolation(err) && !isReadConflict(err)) throw err;
       lastErr = err;
+      if (i < attempts - 1) {
+        // Exponential backoff with full jitter: 10..20, 20..40, 40..80,
+        // 80..160, 160..320, 320..640, 640..1280 ms. Worst case: ~2.5s
+        // total backoff before giving up — enough headroom for FANOUT
+        // collisions to drain on a single-threaded rocksdb backend.
+        const baseMs = 10 * Math.pow(2, i);
+        const jitter = Math.random() * baseMs;
+        await new Promise((r) => setTimeout(r, baseMs + jitter));
+      }
     }
   }
   throw lastErr;

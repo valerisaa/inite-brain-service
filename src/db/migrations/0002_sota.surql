@@ -32,8 +32,15 @@ DEFINE ANALYZER IF NOT EXISTS prefix
 -- attached on first apply of this migration.
 DEFINE TABLE IF NOT EXISTS knowledge_entity SCHEMAFULL CHANGEFEED 30d INCLUDE ORIGINAL;
 
+-- canonicalNameLc — materialised lower-form of canonicalName for
+-- indexed case-insensitive lookups. Marked option<string> rather than
+-- string: SurrealDB v2 type-checks the input BEFORE evaluating VALUE,
+-- so a strict `string` type rejects the CREATE because the caller
+-- doesn't supply canonicalNameLc explicitly. With option<string>, the
+-- field accepts NONE input, then VALUE overrides it to the computed
+-- lowercase form before storage.
 DEFINE FIELD IF NOT EXISTS canonicalNameLc ON knowledge_entity
-  TYPE string VALUE string::lowercase(canonicalName);
+  TYPE option<string> VALUE string::lowercase(canonicalName);
 
 DEFINE INDEX IF NOT EXISTS entity_canonical_lc_idx ON knowledge_entity FIELDS canonicalNameLc;
 DEFINE INDEX IF NOT EXISTS entity_aliases_idx     ON knowledge_entity FIELDS aliases;

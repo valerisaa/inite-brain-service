@@ -51,10 +51,15 @@ interface FactRow {
   bm25Score?: number;
 }
 
-// Reciprocal-rank fusion constant. 60 is the canonical default from the
-// RRF paper (Cormack et al. 2009) — small enough that top-1 from each
-// list dominates, large enough that the long tail still contributes.
-const RRF_K = 60;
+// Convex combination weight for hybrid fusion. 0.5 = equal trust in
+// vector and lexical legs. We deliberately avoid pure rank-based RRF
+// (Cormack et al. 2009) here: the ranks are too coarse for our
+// commonly-tiny per-tenant result sets — a perfect cosine match (1.0)
+// gets compressed to rank 1 with score 1/61, indistinguishable from
+// a near-miss at rank 1 with cosine 0.05. Score-level fusion preserves
+// the magnitude difference, which matters for downstream decay-and-
+// confidence weighting.
+const HYBRID_VECTOR_WEIGHT = 0.5;
 
 @Injectable()
 export class SearchService {
@@ -93,10 +98,6 @@ export class SearchService {
         mode === 'lexical' ? Promise.resolve([] as FactRow[]) : this.vectorLeg(db, dto.query, candidateK, baseWhere),
         mode === 'vector' ? Promise.resolve([] as FactRow[]) : this.lexicalLeg(db, dto.query, candidateK, baseWhere),
       ]);
-      // eslint-disable-next-line no-console
-      console.log('[search debug] mode=', mode, 'vec.len=', vectorRows.length, 'lex.len=', lexicalRows.length);
-      if (vectorRows[0]) console.log('[search debug] vec[0]=', JSON.stringify(vectorRows[0]).slice(0, 400));
-      if (lexicalRows[0]) console.log('[search debug] lex[0]=', JSON.stringify(lexicalRows[0]).slice(0, 400));
 
       // Fuse — vector and lexical lists are joined by fact id; the
       // resulting per-fact score is RRF(vector_rank, lexical_rank)
@@ -259,14 +260,22 @@ export class SearchService {
   }
 
   /**
-   * Reciprocal-rank fusion. Each leg contributes a rank-position; the
-   * fused score is Σ 1/(K + rank). Documents that appear in both
-   * lists naturally rank highest — matching both surface tokens AND
-   * semantic neighbourhood is the strongest signal.
+   * Score-level convex fusion. Each leg's raw score is normalised to
+   * [0, 1] and the legs are combined linearly:
    *
-   * For single-mode searches we skip fusion and just normalize the
-   * raw score into a comparable shape, so downstream decay/confidence
-   * weighting works the same regardless of mode.
+   *   hybrid = w_v * vec_norm + w_l * lex_norm
+   *
+   * where w_v + w_l = 1. A row appearing in both legs gets the full
+   * weighted sum; a row appearing in only one leg is implicitly scored
+   * 0 by the missing leg, so it can still surface but doesn't dominate.
+   *
+   * Why not RRF: rank-based fusion compresses score magnitude. For our
+   * typical per-tenant scale (hundreds of facts), an identical-text
+   * match (cosine ≈ 1.0) and a weak match (cosine ≈ 0.05) both
+   * occupy rank 1 of their respective candidate sets if no better
+   * candidate exists, so RRF treats them as equivalent — which lets
+   * downstream confidence weighting flip the leader. Score-level
+   * fusion preserves the cosine magnitude exactly.
    */
   private fuse(
     vectorRows: FactRow[],
@@ -277,37 +286,49 @@ export class SearchService {
 
     if (mode === 'vector') {
       vectorRows.forEach((r) => {
-        merged.set(String(r.id), { ...r, fusedScore: r.vec ?? 0 });
+        merged.set(String(r.id), {
+          ...r,
+          fusedScore: this.normalizeVec(r.simScore ?? 0),
+        });
       });
       return [...merged.values()];
     }
 
     if (mode === 'lexical') {
       lexicalRows.forEach((r) => {
-        merged.set(String(r.id), { ...r, fusedScore: this.normalizeLex(r.lex ?? 0) });
+        merged.set(String(r.id), {
+          ...r,
+          fusedScore: this.normalizeLex(r.bm25Score ?? 0),
+        });
       });
       return [...merged.values()];
     }
 
-    // Hybrid — RRF on rank positions.
-    vectorRows.forEach((r, idx) => {
+    // Hybrid — convex combination on normalised scores.
+    const w_v = HYBRID_VECTOR_WEIGHT;
+    const w_l = 1 - HYBRID_VECTOR_WEIGHT;
+    vectorRows.forEach((r) => {
       const id = String(r.id);
-      const score = 1 / (RRF_K + idx + 1);
-      merged.set(id, { ...r, fusedScore: score });
+      const vScore = this.normalizeVec(r.simScore ?? 0);
+      merged.set(id, { ...r, fusedScore: w_v * vScore });
     });
-    lexicalRows.forEach((r, idx) => {
+    lexicalRows.forEach((r) => {
       const id = String(r.id);
-      const score = 1 / (RRF_K + idx + 1);
+      const lScore = this.normalizeLex(r.bm25Score ?? 0);
       const existing = merged.get(id);
       if (existing) {
-        existing.fusedScore += score;
-        // Carry lex score forward for diagnostics.
-        existing.lex = r.lex;
+        existing.fusedScore += w_l * lScore;
+        existing.bm25Score = r.bm25Score;
       } else {
-        merged.set(id, { ...r, fusedScore: score });
+        merged.set(id, { ...r, fusedScore: w_l * lScore });
       }
     });
     return [...merged.values()];
+  }
+
+  /** Cosine in [-1, 1] → [0, 1] with negative-correlation clamped to 0. */
+  private normalizeVec(s: number): number {
+    return s <= 0 ? 0 : s > 1 ? 1 : s;
   }
 
   /**

@@ -74,7 +74,16 @@ export class SchemaMigrator {
 
     for (const m of pending) {
       this.logger.log(`Applying ${m.name}`);
-      await conn.query(m.sql);
+      try {
+        await conn.query(m.sql);
+      } catch (err) {
+        this.logger.error(
+          `Migration ${m.name} failed: ${(err as Error).message}`,
+        );
+        throw new Error(
+          `Migration ${m.name} failed: ${(err as Error).message}`,
+        );
+      }
       await conn.query(
         `CREATE schema_migrations CONTENT { migrationId: $id, name: $name }`,
         { id: m.id, name: m.name },

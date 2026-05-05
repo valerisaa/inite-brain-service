@@ -145,9 +145,16 @@ export class IngestService {
       };
       if (!objectIsString) factPayload.objectMeta = dto.object as unknown as object;
 
-      // No competing rows → simple CREATE, no transaction needed.
+      // No competing rows → simple CREATE. Wrapped in retry: under
+      // high-fanout concurrent ingest (FANOUT > pool size), SurrealDB's
+      // optimistic-concurrency aborts contending CREATEs with
+      // `Transaction read conflict`. retryOnUniqueViolation also
+      // handles read-conflicts via isReadConflict, so a second attempt
+      // succeeds against the now-committed prior CREATE.
       if (competing.length === 0) {
-        const created = await dbCreate<any>(db, 'knowledge_fact', factPayload);
+        const created = await retryOnUniqueViolation(() =>
+          dbCreate<any>(db, 'knowledge_fact', factPayload),
+        );
         return { factId: String(created?.id), outcome: 'INSERTED' };
       }
 
@@ -247,26 +254,25 @@ export class IngestService {
       if (fast) return fast;
 
       // 2. Slow path — atomic CREATE entity + CREATE external_ref in one
-      // multi-statement transaction. The IF block re-checks under tx
-      // scope to handle the race where a concurrent caller landed
-      // between our fast-path SELECT and this transaction. Returning
-      // the id from either branch keeps the call site agnostic.
+      // multi-statement transaction. Two simple statements; if the second
+      // fails on the UNIQUE index (concurrent caller landed between our
+      // fast-path SELECT and here), the whole tx rolls back including
+      // the orphan entity. retryOnUniqueViolation re-reads on the next
+      // pass and finds the entity created by the racing caller.
+      //
+      // We deliberately avoid `IF ... { ... } ELSE { ... }` blocks
+      // inside multi-statement transactions: SurrealDB v2 sometimes
+      // evaluates them as opaque sub-blocks whose error becomes a
+      // generic `failed transaction` with no actionable detail.
       const content = factory();
-      const result = await runTransaction<unknown>(db, (tx) => {
-        tx.bind('key', key);
+      const result = await runTransaction<{ id: unknown } | null>(db, (tx) => {
         tx.bind('content', content);
-        tx.add(`LET $existing = (SELECT VALUE entity FROM entity_external_ref WHERE key = $key LIMIT 1)`);
-        tx.add(`
-          IF array::len($existing) > 0 {
-            RETURN $existing[0];
-          } ELSE {
-            LET $new = (CREATE ONLY knowledge_entity CONTENT $content);
-            CREATE entity_external_ref CONTENT { key: $key, entity: $new.id };
-            RETURN $new.id;
-          }
-        `);
+        tx.bind('key', key);
+        tx.add('LET $new = (CREATE ONLY knowledge_entity CONTENT $content)');
+        tx.add('CREATE entity_external_ref CONTENT { key: $key, entity: $new.id }');
+        tx.add('RETURN $new');
       });
-      return String(result);
+      return String(result?.id);
     });
   }
 

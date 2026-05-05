@@ -6,6 +6,27 @@ import { ForgetEntityDto } from './dto/forget.dto';
 import { policyFor, PREDICATE_POLICIES } from '../ingest/conflict-resolver';
 import { BrainScope } from '../auth/api-key.types';
 
+// Centralised SELECT-clause field lists. Adding a new field to a table
+// touches one place here, not every read site. The strings below are
+// pasted into queries as-is, so they must NEVER carry user input —
+// these are static identifiers only.
+const ENTITY_PROFILE_FIELDS =
+  'id, type, canonicalName, externalRefs, mergedAt, mergedInto';
+
+const FACT_PROFILE_FIELDS =
+  'id, predicate, object, confidence, validFrom, validUntil, ' +
+  'recordedAt, retractedAt, status';
+
+const FACT_TIMELINE_FIELDS =
+  'id, predicate, object, confidence, validFrom, validUntil, ' +
+  'recordedAt, retractedAt, retractedBy, retractionReason, ' +
+  'supersededBy, source, status';
+
+const EDGE_TRAVERSAL_FIELDS =
+  'id, kind, weight, source, createdAt, invalidatedAt, in, out, ' +
+  'out.{id, type, canonicalName} AS toEntity, ' +
+  'in.{id, type, canonicalName} AS fromEntity';
+
 export interface EntityProfile {
   entityId: string;
   type: string;
@@ -63,7 +84,7 @@ export class EntitiesService {
 
     return this.surreal.withCompany(companyId, async (db) => {
       const [entRows] = await db.query<any[][]>(
-        `SELECT id, type, canonicalName, externalRefs, mergedAt, mergedInto
+        `SELECT ${ENTITY_PROFILE_FIELDS}
          FROM type::thing('knowledge_entity', $rid) LIMIT 1`,
         { rid: ref.id },
       );
@@ -92,8 +113,7 @@ export class EntitiesService {
         baseClauses.push(`retractedAt IS NONE`);
       }
       const [factRows] = await db.query<any[][]>(
-        `SELECT id, predicate, object, confidence, validFrom, validUntil,
-                recordedAt, retractedAt, status
+        `SELECT ${FACT_PROFILE_FIELDS}
          FROM knowledge_fact
          WHERE ${baseClauses.join(' AND ')}
          ORDER BY recordedAt DESC
@@ -153,9 +173,7 @@ export class EntitiesService {
       if (since) { clauses.push(`recordedAt >= $since`); params.since = since; }
       if (until) { clauses.push(`recordedAt <= $until`); params.until = until; }
       const [factRows] = await db.query<any[][]>(
-        `SELECT id, predicate, object, confidence, validFrom, validUntil,
-                recordedAt, retractedAt, retractedBy, retractionReason,
-                supersededBy, source, status
+        `SELECT ${FACT_TIMELINE_FIELDS}
          FROM knowledge_fact
          WHERE ${clauses.join(' AND ')}
          ORDER BY recordedAt ASC`,
@@ -205,67 +223,46 @@ export class EntitiesService {
     const ref = this.normalizeEntityId(entityIdRaw);
 
     return this.surreal.withCompany(companyId, async (db) => {
-      // Native graph traversal: `->knowledge_edge[...]` walks outbound
-      // edges using the graph adjacency, which scales O(degree) rather
-      // than O(|edges|) the WHERE-based scan needed. We hydrate the
-      // far entity inline via `out.{...}` / `in.{...}` so callers
-      // don't pay an extra round-trip to read the neighbour record.
-      // Two parallel directional reads beat the OR-of-equalities form
-      // because each side hits dedicated `edge_in_idx` / `edge_out_idx`.
-      const kindClause = kind ? `[WHERE kind = $kind AND invalidatedAt IS NONE]` :
-                                 `[WHERE invalidatedAt IS NONE]`;
+      // Property-based traversal with inline neighbour hydration via
+      // `in.{...}` / `out.{...}`. The dedicated edge_in_idx / edge_out_idx
+      // serve the WHERE clauses in O(degree). The full native form
+      // `$entity->knowledge_edge[WHERE ...]` would skip the WHERE
+      // negotiation but is more sensitive to driver-side parsing of
+      // chained graph operators in the JS SDK 2.0.x — switching to it
+      // is tracked under research stream B1 (native graph traversal).
+      const kindParam = kind ? ' AND kind = $kind' : '';
       const sql = `
-        LET $entity = type::thing('knowledge_entity', $rid);
-        LET $out = SELECT
-            id, kind, weight, source, createdAt, invalidatedAt,
-            in, out,
-            out.{id, type, canonicalName} AS toEntity
-          FROM $entity->knowledge_edge${kindClause};
-        LET $inb = SELECT
-            id, kind, weight, source, createdAt, invalidatedAt,
-            in, out,
-            in.{id, type, canonicalName} AS fromEntity
-          FROM $entity<-knowledge_edge${kindClause};
-        RETURN { outbound: $out, inbound: $inb };
+        SELECT ${EDGE_TRAVERSAL_FIELDS}
+        FROM knowledge_edge
+        WHERE (in = type::thing('knowledge_entity', $rid)
+               OR out = type::thing('knowledge_entity', $rid))
+          AND invalidatedAt IS NONE${kindParam}
       `;
-      const result = await db.query<any[]>(sql, { rid: ref.id, kind });
-      const last = (result as any[])[result.length - 1];
-      const payload = (last && typeof last === 'object' ? last : { outbound: [], inbound: [] }) as {
-        outbound: any[];
-        inbound: any[];
-      };
-      const edges = [
-        ...(payload.outbound ?? []).map((e: any) => ({
+      const [rows] = await db.query<any[][]>(sql, { rid: ref.id, kind });
+      const fullSelf = ref.full;
+      const edges = ((rows as any[]) ?? []).map((e: any) => {
+        const inStr = String(e.in);
+        const outStr = String(e.out);
+        const isOutbound = inStr === fullSelf;
+        const farSide = isOutbound ? e.toEntity : e.fromEntity;
+        return {
           edgeId: String(e.id),
-          from: String(e.in),
-          to: String(e.out),
+          from: inStr,
+          to: outStr,
           kind: e.kind,
           weight: e.weight,
           source: e.source,
           createdAt: new Date(e.createdAt).toISOString(),
-          neighbour: e.toEntity ? {
-            id: String(e.toEntity.id),
-            type: e.toEntity.type,
-            canonicalName: e.toEntity.canonicalName,
-          } : undefined,
-          direction: 'outbound' as const,
-        })),
-        ...(payload.inbound ?? []).map((e: any) => ({
-          edgeId: String(e.id),
-          from: String(e.in),
-          to: String(e.out),
-          kind: e.kind,
-          weight: e.weight,
-          source: e.source,
-          createdAt: new Date(e.createdAt).toISOString(),
-          neighbour: e.fromEntity ? {
-            id: String(e.fromEntity.id),
-            type: e.fromEntity.type,
-            canonicalName: e.fromEntity.canonicalName,
-          } : undefined,
-          direction: 'inbound' as const,
-        })),
-      ];
+          neighbour: farSide
+            ? {
+                id: String(farSide.id),
+                type: farSide.type,
+                canonicalName: farSide.canonicalName,
+              }
+            : undefined,
+          direction: isOutbound ? ('outbound' as const) : ('inbound' as const),
+        };
+      });
       return { entityId: ref.full, edges };
     });
   }
