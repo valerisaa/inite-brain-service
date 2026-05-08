@@ -11,6 +11,10 @@ on:
         description: 'Also run the real e2e suite (requires OPENAI_API_KEY secret)'
         required: false
         default: 'false'
+      run_eval:
+        description: 'Also run the multi-vertical quality eval (requires OPENAI_API_KEY secret)'
+        required: false
+        default: 'false'
 
 jobs:
   build-test:
@@ -73,6 +77,56 @@ jobs:
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: pnpm test:e2e:real
+
+  # Multi-vertical quality eval — recall@k, MRR, extraction-recall,
+  # PII gating, identity-resolution. Hard thresholds asserted inside
+  # test/quality.real-e2e-spec.ts (overall AND per-vertical), so a
+  # regression here fails the job. Gated on a real OPENAI_API_KEY
+  # because the eval depends on production-shape extraction +
+  # embedding behaviour, not stubs.
+  #
+  # Trigger surface:
+  #   - push to main (post-merge gate; long-running, ~5-10 min)
+  #   - workflow_dispatch with run_eval=true (manual, any branch)
+  # We deliberately DO NOT run on every PR — secrets aren't
+  # available to forks and the run cost (OpenAI tokens × scenarios)
+  # is non-trivial. PRs are gated on lint + build + in-process e2e
+  # via build-test; eval drift is caught at the merge boundary and
+  # by the manual dispatch button.
+  quality-eval:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    if: |
+      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.run_eval == 'true')
+    needs: build-test
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Checkout inite-shared (sibling for SDK source)
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/inite-shared
+          path: ../inite-shared
+          token: ${{ secrets.INITE_SHARED_PAT || github.token }}
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'pnpm'
+
+      - name: Install
+        run: pnpm install --frozen-lockfile --ignore-workspace
+
+      - name: Quality eval (multi-vertical, real OpenAI)
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: pnpm test:eval
 
   docker:
     runs-on: ubuntu-latest
