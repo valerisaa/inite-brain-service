@@ -38,6 +38,23 @@ export class Reporter {
       }
     }
 
+    // Memory-lifecycle: only show assertions that FAILED — passing ones
+    // are uninteresting noise on a clean run, but a failure should be
+    // loud enough that the operator can grep it from CI logs.
+    const failedAssertions = report.outcomes.flatMap((o) =>
+      o.memoryAssertionResults.filter((a) => !a.passed),
+    );
+    if (failedAssertions.length > 0) {
+      lines.push('', '### Memory-lifecycle FAILURES', '');
+      lines.push('| scenario | kind | description | detail |');
+      lines.push('|---|---|---|---|');
+      for (const a of failedAssertions) {
+        lines.push(
+          `| ${a.scenarioId} | ${a.kind} | ${this.shorten(a.description)} | ${this.shorten(a.detail ?? '')} |`,
+        );
+      }
+    }
+
     return lines.join('\n');
   }
 

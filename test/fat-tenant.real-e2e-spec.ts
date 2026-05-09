@@ -27,6 +27,7 @@ import {
   Aggregator,
   EvalRunner,
   Reporter,
+  MemoryAssertionsChecker,
 } from './eval/runner';
 
 describe('Fat-tenant retrieval eval', () => {
@@ -77,6 +78,7 @@ describe('Fat-tenant retrieval eval', () => {
         new ScenarioRunner(
           new SetupApplier(fullClient),
           new QueryExecutor(fullClient, limitedClient),
+          new MemoryAssertionsChecker(fullClient),
         ),
         new Aggregator(),
       );

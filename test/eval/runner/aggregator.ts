@@ -12,6 +12,7 @@ import {
   entityExtractionRate,
   identityResolutionRate,
   piiGatingCorrectness,
+  memoryLifecycleCorrectness,
 } from '../metrics';
 
 /**
@@ -49,6 +50,7 @@ export class Aggregator {
     const merges = group
       .map((o) => o.identityMergeResult)
       .filter((r): r is NonNullable<typeof r> => r !== undefined);
+    const memAssertions = group.flatMap((o) => o.memoryAssertionResults);
 
     return [
       { name: 'recall@1', value: recallAtK(queries, 1), threshold: 0.6 },
@@ -68,6 +70,16 @@ export class Aggregator {
       {
         name: 'pii-gating-correctness',
         value: piiGatingCorrectness(queries),
+        threshold: 1.0,
+      },
+      // memory-lifecycle correctness covers update / supersede /
+      // retract / forget. Threshold 1.0 — any lifecycle assertion
+      // failing means brain's read-side disagrees with the write
+      // semantics, which is non-negotiable. null when the slice has
+      // no memory assertions (e.g. plain retrieval suites).
+      {
+        name: 'memory-lifecycle-correctness',
+        value: memoryLifecycleCorrectness(memAssertions),
         threshold: 1.0,
       },
     ];

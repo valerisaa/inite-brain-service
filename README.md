@@ -92,6 +92,19 @@ curl -X POST http://localhost:3000/v1/search \
   -d '{ "query": "maintenance issues", "limit": 5 }'
 ```
 
+## Loading a custom directory for eval
+
+The directory eval (`pnpm test:eval:directory`) defaults to a synthetic 1k-customer fixture generated from `test/eval/fixtures/fat-tenant.generator.ts`. Same pipeline accepts a real-world directory if you give it a `Scenario` shape:
+
+1. Read your source (CSV / JSON / API export) into the in-memory `setup: SetupStep[]` array. Each row becomes one `{ kind: 'fact', entityRef, predicate, object, validFrom, source }` step. Map your domain predicates onto brain's vocabulary (`name` / `email` / `tier` / `status` / `complained_about` / `interacted_with` / `address` / …).
+2. Add `tag` to fact steps you intend to retract later, plus a `{ kind: 'retract', tag, reason }` step. Use `{ kind: 'forget', entityRef, reason, requestId }` for GDPR cascades.
+3. Optionally add `memoryAssertions: MemoryAssertion[]` for entities you've retracted/forgotten — the runner will validate that brain's read-side reflects the lifecycle ops.
+4. Drop the resulting `Scenario` into a new spec file modelled on `test/directory.real-e2e-spec.ts`. The runner is the same; only the fixture changes.
+
+Example: a 50k-row CRM export becomes ~50k fact steps. Seeding cost is dominated by HNSW + BM25 indexing — budget ~1 minute per 5k facts on a single Surreal node, scaling near-linearly. Set timeouts and `runInBand` to keep memory pressure low.
+
+The generator's tunables (temporal tier fraction, competing-status fraction, etc.) are env-overridable when running the built-in directory eval — see `BRAIN_DIRECTORY_*` knobs at the top of `test/directory.real-e2e-spec.ts`.
+
 ## Multi-hop search
 
 `POST /v1/search/multi-hop` runs a CHAINED search: a planner LLM decomposes the free-text query into ≤ `maxHops` sub-queries with combination semantics, then the executor runs them in sequence — each later hop optionally anchored to the running entity set so the search engine never wastes work on candidates already disqualified upstream.
@@ -240,6 +253,9 @@ The service runs `validateEnv()` before NestJS starts. Missing or malformed valu
 |---|---|---|
 | `pnpm test:e2e` | testcontainers SurrealDB + in-process NestJS app + stub embedder/extractor | every commit (CI runs this on push) |
 | `pnpm test:e2e:real` | spawns brain as a separate node process, hits it via `@inite/knowledge` SDK over HTTP, MCP client roundtrip, **real OpenAI** | manual / pre-release; needs `OPENAI_API_KEY` |
+| `pnpm test:eval` | multi-vertical retrieval + memory-lifecycle eval; hard-thresholds enforced (recall@1 ≥ 0.6, MRR ≥ 0.5, memory-lifecycle-correctness = 1.0, …) | post-merge to main (CI gates), pre-release |
+| `pnpm test:eval:fat` | spawns a ~500-customer tenant via the generator and asserts retrieval thresholds at scale (FAT_TENANT_RUN=1 implied) | when you've changed retrieval scoring and need to confirm the small-graph regression is gone |
+| `pnpm test:eval:directory` | jumbo eval — 1k customers with retracts, GDPR forgets, temporal tier trajectories, competing status; asserts memory-lifecycle correctness AND recall@3 at scale | when you've touched ingest / lifecycle code; before signing off on a release |
 | `pnpm lint` | ESLint flat config | every commit |
 
 ### Docker

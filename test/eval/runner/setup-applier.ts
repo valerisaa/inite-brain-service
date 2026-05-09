@@ -1,6 +1,9 @@
 import type { BrainClient } from '@inite/knowledge';
 import type {
   SetupMentionStep,
+  SetupRetractStep,
+  SetupForgetStep,
+  SetupFactStep,
   ExtractionResult,
   IdentityMergeResult,
   Scenario,
@@ -21,19 +24,16 @@ export class SetupApplier {
     identityMerge?: IdentityMergeResult;
   }> {
     const extractions: ExtractionResult[] = [];
+    // Tag → factId map. Lets retract steps reference an earlier
+    // fact step by the human-readable handle declared in the scenario,
+    // without round-tripping the server-assigned factId through the
+    // fixture.
+    const factIdsByTag = new Map<string, string>();
 
     for (const step of scenario.setup) {
       switch (step.kind) {
         case 'fact':
-          await this.brain.ingest.fact({
-            entityRef: step.entityRef,
-            predicate: step.predicate,
-            object: step.object,
-            validFrom: step.validFrom,
-            validUntil: step.validUntil,
-            confidence: step.confidence,
-            source: step.source,
-          });
+          await this.applyFact(step, factIdsByTag);
           break;
         case 'mention':
           extractions.push(await this.applyMention(scenario.id, step));
@@ -46,6 +46,12 @@ export class SetupApplier {
             source: step.source,
           });
           break;
+        case 'retract':
+          await this.applyRetract(step, factIdsByTag);
+          break;
+        case 'forget':
+          await this.applyForget(step);
+          break;
       }
     }
 
@@ -55,6 +61,61 @@ export class SetupApplier {
     }
 
     return { extractions, identityMerge };
+  }
+
+  private async applyFact(
+    step: SetupFactStep,
+    factIdsByTag: Map<string, string>,
+  ): Promise<void> {
+    const res = await this.brain.ingest.fact({
+      entityRef: step.entityRef,
+      predicate: step.predicate,
+      object: step.object,
+      validFrom: step.validFrom,
+      validUntil: step.validUntil,
+      confidence: step.confidence,
+      source: step.source,
+    });
+    if (step.tag && res.factId) {
+      factIdsByTag.set(step.tag, res.factId);
+    }
+    // outcome=REJECTED leaves res.factId null — silently drop the tag.
+    // The retract step will surface the misconfiguration with a clear
+    // "no factId for tag X" warning rather than a confusing 404.
+  }
+
+  private async applyRetract(
+    step: SetupRetractStep,
+    factIdsByTag: Map<string, string>,
+  ): Promise<void> {
+    const factId = factIdsByTag.get(step.tag);
+    if (!factId) {
+      throw new Error(
+        `[setup-applier] retract: no factId resolved for tag '${step.tag}' — ` +
+          `either the prior fact step lacked a tag or it was REJECTED at ingest`,
+      );
+    }
+    await this.brain.facts.retract(factId, {
+      reason: step.reason,
+      retractedBy: { source: 'system' },
+    });
+  }
+
+  private async applyForget(step: SetupForgetStep): Promise<void> {
+    const entityId = await this.findEntityIdByRef(
+      `${step.entityRef.vertical}.${step.entityRef.id}`,
+    );
+    if (!entityId) {
+      throw new Error(
+        `[setup-applier] forget: could not resolve entity for ref ` +
+          `'${step.entityRef.vertical}.${step.entityRef.id}' — ` +
+          `either no fact ingested for it or the externalRef shape mismatched`,
+      );
+    }
+    await this.brain.entities.forget(entityId, {
+      reason: step.reason,
+      requestId: step.requestId,
+    });
   }
 
   private async applyMention(

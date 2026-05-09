@@ -79,6 +79,30 @@ export interface FatTenantOpts {
   customers?: number;
   staff?: number;
   projects?: number;
+  /**
+   * Fraction of customers that get a 3-hop temporal tier trajectory
+   * (standard → gold → platinum) instead of one static tier fact.
+   * Stresses bitemporal indices + supersede semantics. Default 0.3.
+   */
+  temporalTierFraction?: number;
+  /**
+   * Fraction of customers that receive a contradicting status fact
+   * (active vs churned) at similar confidence — exercises the
+   * conflict resolver's COMPETING outcome. Default 0.05.
+   */
+  competingStatusFraction?: number;
+  /**
+   * Fraction of complaints that get retracted post-ingest. Each
+   * retraction is a tag→retract pair so the runner can validate
+   * that retracted facts disappear from default search. Default 0.03.
+   */
+  retractedComplaintsFraction?: number;
+  /**
+   * Fraction of customers that are GDPR-forgotten after ingest.
+   * Combined with directory-level memory assertions, exercises
+   * cascade-completeness at scale. Default 0.01.
+   */
+  forgottenCustomersFraction?: number;
 }
 
 export interface FatTenantFixture {
@@ -90,6 +114,10 @@ export interface FatTenantFixture {
     projects: number;
     totalEntities: number;
     totalFacts: number;
+    temporalTierCustomers: number;
+    competingStatusCustomers: number;
+    retractedComplaints: number;
+    forgottenCustomers: number;
   };
 }
 
@@ -109,11 +137,35 @@ export function buildFatTenant(opts: FatTenantOpts = {}): FatTenantFixture {
   const customerCount = opts.customers ?? 500;
   const staffCount = opts.staff ?? 50;
   const projectCount = opts.projects ?? 30;
+  const temporalTierFrac = opts.temporalTierFraction ?? 0.3;
+  const competingStatusFrac = opts.competingStatusFraction ?? 0.05;
+  const retractedComplaintsFrac = opts.retractedComplaintsFraction ?? 0.03;
+  const forgottenCustomersFrac = opts.forgottenCustomersFraction ?? 0.01;
   const rand = mulberry32(seed);
   const pick = <T>(arr: readonly T[]): T => arr[Math.floor(rand() * arr.length)];
 
   const setup: SetupStep[] = [];
   let factCount = 0;
+  let temporalTierCount = 0;
+  let competingStatusCount = 0;
+  let retractedComplaintCount = 0;
+  let forgottenCustomerCount = 0;
+  // Track which customers will be forgotten — needed for the
+  // post-ingest forget steps and for memory assertions on those
+  // entities. Track separately by attribute so the assertion list
+  // can probe each angle (name, complaint object, payment event).
+  const forgottenCustomers: Array<{
+    id: string;
+    fullName: string;
+    complaintObject?: string;
+    paymentObject?: string;
+  }> = [];
+  // Track retracted complaints so memory assertions can verify the
+  // object string disappears from default search.
+  const retractedComplaints: Array<{ id: string; object: string }> = [];
+  // Track temporal-tier customers so memory assertions can verify
+  // the latest tier surfaces and the older ones do not.
+  const temporalTierCustomers: Array<{ id: string; fullName: string; finalTier: string; staleTier: string }> = [];
 
   // Customers — name + tier + a small pool of complaints/interactions.
   for (let i = 0; i < customerCount; i++) {
@@ -130,21 +182,97 @@ export function buildFatTenant(opts: FatTenantOpts = {}): FatTenantFixture {
     });
     factCount++;
 
-    // Tier — half on gold, a fifth on platinum, the rest standard.
-    const tierRoll = rand();
-    const tier = tierRoll < 0.2 ? 'platinum' : tierRoll < 0.7 ? 'gold' : 'standard';
+    // Tier — most customers get one static fact; a fraction get a
+    // 3-hop trajectory (standard → gold → platinum) so the eval
+    // exercises the supersede chain on bitemporal predicates.
+    const isTemporalTier = rand() < temporalTierFrac;
+    if (isTemporalTier) {
+      temporalTierCount++;
+      // Three tier facts with bookended validFrom/validUntil. The
+      // final fact carries no validUntil — that's the surviving
+      // truth a default-search query should return.
+      setup.push({
+        kind: 'fact',
+        entityRef: { vertical: 'fat', id },
+        predicate: 'tier',
+        object: 'standard',
+        validFrom: ISO('2026-01-15'),
+        validUntil: ISO('2026-02-15'),
+        confidence: 0.9,
+        source: { vertical: 'fat', eventId: 'billing.tier_change' },
+      });
+      setup.push({
+        kind: 'fact',
+        entityRef: { vertical: 'fat', id },
+        predicate: 'tier',
+        object: 'gold',
+        validFrom: ISO('2026-02-15'),
+        validUntil: ISO('2026-04-01'),
+        confidence: 0.92,
+        source: { vertical: 'fat', eventId: 'billing.tier_change' },
+      });
+      setup.push({
+        kind: 'fact',
+        entityRef: { vertical: 'fat', id },
+        predicate: 'tier',
+        object: 'platinum',
+        validFrom: ISO('2026-04-01'),
+        confidence: 0.95,
+        source: { vertical: 'fat', eventId: 'billing.tier_change' },
+      });
+      factCount += 3;
+      temporalTierCustomers.push({
+        id,
+        fullName,
+        finalTier: 'platinum',
+        staleTier: 'standard',
+      });
+    } else {
+      const tierRoll = rand();
+      const tier = tierRoll < 0.2 ? 'platinum' : tierRoll < 0.7 ? 'gold' : 'standard';
+      setup.push({
+        kind: 'fact',
+        entityRef: { vertical: 'fat', id },
+        predicate: 'tier',
+        object: tier,
+        validFrom: ISO('2026-02-01'),
+        source: { vertical: 'fat' },
+      });
+      factCount++;
+    }
+
+    // Status — most customers get one fact (`active`). A small
+    // fraction also receive a contradicting `churned` fact at near-
+    // identical confidence, exercising the conflict resolver's
+    // COMPETING outcome (both stay active until human resolution).
     setup.push({
       kind: 'fact',
       entityRef: { vertical: 'fat', id },
-      predicate: 'tier',
-      object: tier,
-      validFrom: ISO('2026-02-01'),
-      source: { vertical: 'fat' },
+      predicate: 'status',
+      object: 'active',
+      validFrom: ISO('2026-01-15'),
+      confidence: 0.85,
+      source: { vertical: 'fat', eventId: 'crm.status' },
     });
     factCount++;
+    if (rand() < competingStatusFrac) {
+      competingStatusCount++;
+      setup.push({
+        kind: 'fact',
+        entityRef: { vertical: 'fat', id },
+        predicate: 'status',
+        object: 'churned',
+        // Same validFrom — pure contradiction, not a temporal update.
+        validFrom: ISO('2026-01-15'),
+        confidence: 0.84,
+        source: { vertical: 'fat', eventId: 'support.churn_signal' },
+      });
+      factCount++;
+    }
 
     // 0-3 complaints per customer — most have none, a few have many.
     const complaints = Math.floor(rand() * 4);
+    let firstComplaintObject: string | undefined;
     for (let c = 0; c < complaints; c++) {
       const topicPool =
         rand() < 0.4
@@ -152,29 +280,74 @@ export function buildFatTenant(opts: FatTenantOpts = {}): FatTenantFixture {
           : rand() < 0.7
             ? NOISE_TOPICS
             : PARKING_TOPICS;
+      const obj = pick(topicPool);
+      if (!firstComplaintObject) firstComplaintObject = obj;
+      // A small slice of complaints are retracted post-ingest.
+      // Tag the fact step so the retract step (emitted later) can
+      // resolve the factId without round-tripping through the
+      // server. Tag is unique per (customer, complaint-index).
+      const willRetract = rand() < retractedComplaintsFrac;
+      const tag = willRetract ? `cust_${i}_complaint_${c}` : undefined;
       setup.push({
         kind: 'fact',
         entityRef: { vertical: 'fat', id },
         predicate: 'complained_about',
-        object: pick(topicPool),
+        object: obj,
         validFrom: ISO('2026-03-01'),
         source: { vertical: 'fat', messageId: `complaint_${id}_${c}` },
+        ...(tag ? { tag } : {}),
       });
       factCount++;
+      if (willRetract) {
+        retractedComplaintCount++;
+        retractedComplaints.push({ id, object: obj });
+        setup.push({
+          kind: 'retract',
+          tag: tag!,
+          reason: 'reporter walked it back',
+        });
+      }
     }
 
     // 0-2 payment events per customer.
+    let paymentObject: string | undefined;
     if (rand() < 0.3) {
+      paymentObject = pick(PAYMENT_TOPICS);
       setup.push({
         kind: 'fact',
         entityRef: { vertical: 'fat', id },
         predicate: 'interacted_with',
-        object: pick(PAYMENT_TOPICS),
+        object: paymentObject,
         validFrom: ISO('2026-04-01'),
         source: { vertical: 'fat', eventId: 'billing.payment' },
       });
       factCount++;
     }
+
+    // Forget — flagged AFTER all the customer's data has been
+    // ingested so the cascade has something to delete. Tracked
+    // separately so the assertion-emitter can probe each angle
+    // (name / complaint / payment) of the forgotten record.
+    if (rand() < forgottenCustomersFrac) {
+      forgottenCustomerCount++;
+      forgottenCustomers.push({
+        id,
+        fullName,
+        complaintObject: firstComplaintObject,
+        paymentObject,
+      });
+    }
+  }
+
+  // Forget step — emitted AFTER all customer facts so the cascade
+  // has the full footprint to delete in one shot.
+  for (const fc of forgottenCustomers) {
+    setup.push({
+      kind: 'forget',
+      entityRef: { vertical: 'fat', id: fc.id },
+      reason: 'gdpr_request',
+      requestId: `GDPR-FAT-${fc.id}`,
+    });
   }
 
   // Staff — name + role + assigned-to-project.
@@ -322,15 +495,82 @@ export function buildFatTenant(opts: FatTenantOpts = {}): FatTenantFixture {
     },
   ];
 
+  // Memory-lifecycle assertions emitted from the directory shape:
+  //   - Forgotten customers: each must vanish from default search on
+  //     every angle that previously identified them (name, complaint
+  //     object, payment object).
+  //   - Retracted complaints: the complaint object string must NOT
+  //     surface for the originating customer in default search.
+  //   - Temporal-tier customers: the FINAL tier (platinum) is the
+  //     one that surfaces; the staleTier (standard) does not.
+  //
+  // We probe a bounded slice (first 10) of each bucket to keep the
+  // eval runtime bounded — the full bucket can be large at scale.
+  const memoryAssertions: Scenario['memoryAssertions'] = [];
+  const PROBE_LIMIT = 10;
+
+  for (const fc of forgottenCustomers.slice(0, PROBE_LIMIT)) {
+    memoryAssertions.push({
+      description: `forgotten customer ${fc.id} no longer surfaces by name`,
+      kind: 'no_search_match',
+      query: fc.fullName,
+      expectedRefAbsent: `fat.${fc.id}`,
+    });
+    if (fc.complaintObject) {
+      memoryAssertions.push({
+        description: `forgotten customer ${fc.id} no longer surfaces via complaint content`,
+        kind: 'no_search_match',
+        query: fc.complaintObject,
+        expectedRefAbsent: `fat.${fc.id}`,
+      });
+    }
+    if (fc.paymentObject) {
+      memoryAssertions.push({
+        description: `forgotten customer ${fc.id} no longer surfaces via payment-event content`,
+        kind: 'no_search_match',
+        query: fc.paymentObject,
+        expectedRefAbsent: `fat.${fc.id}`,
+      });
+    }
+  }
+
+  for (const rc of retractedComplaints.slice(0, PROBE_LIMIT)) {
+    memoryAssertions.push({
+      description: `retracted complaint of ${rc.id} no longer surfaces in default search`,
+      kind: 'search_object_absent',
+      query: rc.object,
+      expectedRefAbsent: `fat.${rc.id}`,
+      objectSubstring: rc.object,
+    });
+  }
+
+  for (const tc of temporalTierCustomers.slice(0, PROBE_LIMIT)) {
+    memoryAssertions.push({
+      description: `temporal-tier customer ${tc.id}: final tier surfaces in default search`,
+      kind: 'search_object_present',
+      query: `${tc.fullName} tier`,
+      expectedRefPresent: `fat.${tc.id}`,
+      objectSubstring: tc.finalTier,
+    });
+    memoryAssertions.push({
+      description: `temporal-tier customer ${tc.id}: stale tier does NOT surface in default search`,
+      kind: 'search_object_absent',
+      query: `${tc.fullName} tier`,
+      expectedRefAbsent: `fat.${tc.id}`,
+      objectSubstring: tc.staleTier,
+    });
+  }
+
   return {
     scenarios: [
       {
         id: 'fat-tenant.mid-scale',
         vertical: 'cross',
         description:
-          `Fat-tenant fixture: ~${customerCount} customers + ${staffCount} staff + ${projectCount} projects, ~${factCount} facts. Tests retrieval at the scale where graph-aware techniques (PPR, community lookup) start to pay off.`,
+          `Fat-tenant fixture: ~${customerCount} customers + ${staffCount} staff + ${projectCount} projects, ~${factCount} facts. ${temporalTierCount} temporal-tier customers, ${competingStatusCount} competing-status, ${retractedComplaintCount} retracted complaints, ${forgottenCustomerCount} forgotten. Tests retrieval AND memory-lifecycle correctness at the scale where graph-aware techniques start to pay off.`,
         setup,
         queries,
+        memoryAssertions,
       },
     ],
     stats: {
@@ -339,6 +579,10 @@ export function buildFatTenant(opts: FatTenantOpts = {}): FatTenantFixture {
       projects: projectCount,
       totalEntities: customerCount + staffCount + projectCount + 3,
       totalFacts: factCount,
+      temporalTierCustomers: temporalTierCount,
+      competingStatusCustomers: competingStatusCount,
+      retractedComplaints: retractedComplaintCount,
+      forgottenCustomers: forgottenCustomerCount,
     },
   };
 }

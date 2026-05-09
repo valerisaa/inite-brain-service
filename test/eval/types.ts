@@ -22,6 +22,37 @@ export interface SetupFactStep {
   validUntil?: string;
   confidence?: number;
   source: { vertical: string; messageId?: string; eventId?: string };
+  /**
+   * Optional handle so later setup steps (retract / forget) can
+   * reference this fact without knowing its server-assigned factId.
+   * Tags live in scenario-local scope; the applier maintains a map
+   * tag → factId and resolves retract steps against it.
+   */
+  tag?: string;
+}
+
+/**
+ * Retract a previously-ingested fact. References the fact via the
+ * `tag` set on its SetupFactStep — keeps scenarios declarative
+ * without round-tripping factIds through the fixture file.
+ */
+export interface SetupRetractStep {
+  kind: 'retract';
+  tag: string;
+  reason: string;
+}
+
+/**
+ * Forget an entity (cascade-delete every fact, edge, embedding;
+ * leave only the HMAC tombstone). References the entity by its
+ * external ref (same form as ingest steps), which the applier
+ * resolves to a server-side entityId.
+ */
+export interface SetupForgetStep {
+  kind: 'forget';
+  entityRef: { vertical: string; id: string };
+  reason: 'gdpr_request' | 'tenant_offboarding' | 'operator_request';
+  requestId: string;
 }
 
 export interface SetupMentionStep {
@@ -54,7 +85,12 @@ export interface SetupLinkStep {
   source: { vertical: string; eventId?: string };
 }
 
-export type SetupStep = SetupFactStep | SetupMentionStep | SetupLinkStep;
+export type SetupStep =
+  | SetupFactStep
+  | SetupMentionStep
+  | SetupLinkStep
+  | SetupRetractStep
+  | SetupForgetStep;
 
 // ── Query expectations ────────────────────────────────────────────────
 
@@ -91,6 +127,47 @@ export interface QueryExpectation {
   mustNotLeakPredicate?: string;
 }
 
+// ── Memory-lifecycle assertions ───────────────────────────────────────
+// Run AFTER setup, BEFORE queries. They check that brain's read-side
+// reflects the lifecycle operations (update, retract, forget) declared
+// in the setup. Each assertion is a single boolean check against a
+// specific brain endpoint.
+
+export interface MemoryAssertion {
+  /**
+   * Free-text label. Surfaced in the report so a failing assertion
+   * tells the operator WHICH lifecycle invariant broke.
+   */
+  description: string;
+  kind:
+    | 'no_search_match' // search returns no hit matching expectedRefAbsent
+    | 'search_object_present' // expectedRefPresent's facts contain object substring
+    | 'search_object_absent'; // expectedRefAbsent's facts do NOT contain object substring
+  /** Free-text query for `no_search_match` / `search_object_*` kinds. */
+  query?: string;
+  /**
+   * Required for `no_search_match` and `search_object_absent` — the
+   * externalRef whose presence/facts we're checking against.
+   */
+  expectedRefAbsent?: string;
+  /** Required for `search_object_present`. */
+  expectedRefPresent?: string;
+  /**
+   * For `search_object_*` kinds — the substring (case-insensitive)
+   * we expect to see / not see in the matching entity's facts.
+   */
+  objectSubstring?: string;
+  /**
+   * Optional includeRetracted flag for the search call. Default
+   * false (the default-search behaviour we're trying to validate).
+   * Set true on the asOf-historical sub-tests where the retracted
+   * fact SHOULD still surface.
+   */
+  includeRetracted?: boolean;
+  /** Optional asOf for bitemporal lifecycle assertions. */
+  asOf?: string;
+}
+
 // ── Scenario ──────────────────────────────────────────────────────────
 
 export interface Scenario {
@@ -107,6 +184,12 @@ export interface Scenario {
     survivorRef: string; // '<vertical>.<id>'
     loserRef: string;
   };
+  /**
+   * Optional memory-lifecycle assertions. Run AFTER setup, BEFORE
+   * queries. Aggregated into the `memory-lifecycle-correctness`
+   * metric — % assertions that passed across the suite.
+   */
+  memoryAssertions?: MemoryAssertion[];
 }
 
 // ── Metric outputs (per scenario / aggregate) ─────────────────────────
@@ -137,12 +220,22 @@ export interface IdentityMergeResult {
   merged: boolean;
 }
 
+export interface MemoryAssertionResult {
+  scenarioId: string;
+  description: string;
+  kind: MemoryAssertion['kind'];
+  passed: boolean;
+  /** Short detail for the report (e.g. "search returned cust_42 unexpectedly"). */
+  detail?: string;
+}
+
 export interface ScenarioOutcome {
   scenarioId: string;
   vertical: Vertical;
   queryResults: QueryResult[];
   extractionResults: ExtractionResult[];
   identityMergeResult?: IdentityMergeResult;
+  memoryAssertionResults: MemoryAssertionResult[];
 }
 
 export interface AggregateMetric {

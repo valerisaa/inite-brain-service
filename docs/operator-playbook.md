@@ -124,6 +124,25 @@ console.log(stats); // { companyId, factsCompacted, bytesFreed }
 
 If the cron itself is missing (no `[CompactionService] Compaction starting…` log line at 03:17 UTC), check that `ScheduleModule` is imported by `CompactionModule` and that the process actually survives until 03:17 (no nightly restart).
 
+## Run the memory-lifecycle eval
+
+`pnpm test:eval` covers retrieval AND memory-lifecycle assertions across the full scenario suite. The lifecycle slice (`memlc.*` scenario ids) validates four invariants:
+
+1. **Update / supersede** — newer fact replaces older; default search returns the new object only. `memlc.update.tier-upgrade`, `memlc.supersede-chain.tier-trajectory`.
+2. **Retract** — retracted fact does NOT surface in default search; `includeRetracted=true` with the right `asOf` still finds it (audit trail intact). `memlc.retract.complaint-walk-back`.
+3. **Forget** — GDPR cascade removes every angle of the entity from default search (name, email, complaint, interaction). `memlc.forget.gdpr-cascade`.
+4. **Update + retract cycle** — operator records a wrong fact on top of the right one, then retracts the wrong fact. The original truth remains in default search. `memlc.cycle.update-then-retract`.
+
+The aggregator surfaces `memory-lifecycle-correctness` (fraction of memory-lifecycle assertions passed). The threshold is **1.0** — anything less means brain's read side disagrees with the write semantics, which is non-negotiable. A failing assertion appears in the report's "Memory-lifecycle FAILURES" section with scenario id, kind, and detail.
+
+For scale validation, run `pnpm test:eval:directory`. The jumbo fixture seeds ~1k customers with realistic distributions:
+- 30% temporal tier trajectories (3-fact supersede chain over 3 months)
+- 5% competing status (active vs churned, near-identical confidence)
+- 3% retracted complaints
+- 1% GDPR-forgotten customers (full cascade — name, email, complaints, payment events)
+
+Memory assertions probe a bounded slice (first 10 entries) of each lifecycle bucket so the runtime stays under the timeout cap. Tunable via `BRAIN_DIRECTORY_*` env vars (see `test/directory.real-e2e-spec.ts` head comment).
+
 ## Restore from event replay
 
 Brain is a **system of insight**. If the storage layer is wiped, restore by replaying the upstream events:

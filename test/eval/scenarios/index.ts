@@ -10,6 +10,7 @@ import { adversarialScenarios } from './adversarial.scenarios';
 import { bitemporalScenarios } from './bitemporal.scenarios';
 import { conflictResolutionScenarios } from './conflict-resolution.scenarios';
 import { graphTraversalScenarios } from './graph-traversal.scenarios';
+import { memoryLifecycleScenarios } from './memory-lifecycle.scenarios';
 
 export const allScenarios: Scenario[] = [
   ...rentScenarios,
@@ -23,6 +24,7 @@ export const allScenarios: Scenario[] = [
   ...bitemporalScenarios,
   ...conflictResolutionScenarios,
   ...graphTraversalScenarios,
+  ...memoryLifecycleScenarios,
 ];
 
 export {
@@ -37,4 +39,5 @@ export {
   bitemporalScenarios,
   conflictResolutionScenarios,
   graphTraversalScenarios,
+  memoryLifecycleScenarios,
 };
