@@ -314,7 +314,7 @@ Every fact carries two time axes:
 - `validFrom` / `validUntil` — when the fact was true in the **real world**
 - `recordedAt` / `retractedAt` — when **brain knew** about it
 
-This enables both "what was true on date X" and "what did we know on date X" queries. Retractions never delete; they close `validUntil` and set `retractedAt`. The fact row stays for audit.
+**Default search = "actual now"** (Datomic / Zep convention). Without `asOf`, brain returns only currently-true facts: `validFrom <= now < validUntil`, status not superseded/compacted, not retracted. Audit / historical access through `asOf=<date>` or `includeStale: true`. Conflict resolver uses Allen's interval algebra — sequential validity intervals don't compete. Full semantics in [`docs/bitemporal-semantics.md`](docs/bitemporal-semantics.md).
 
 ## Predicate vocabulary + conflict resolution
 
