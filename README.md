@@ -26,6 +26,7 @@ Layer 1 — Identity (auth)
 | `GET /health` | ✅ |
 | `POST /v1/ingest/fact` | ✅ |
 | `POST /v1/search` | ✅ |
+| `POST /v1/synthesize` | ✅ (corrective-RAG, opt-in via `OPENAI_API_KEY`) |
 | `POST /v1/ingest/mention` | planned 0.2.0 |
 | `POST /v1/ingest/link` | planned 0.2.0 |
 | `GET /v1/entities/:id` | planned 0.2.0 |
@@ -88,6 +89,23 @@ curl -X POST http://localhost:3000/v1/search \
   -H "Authorization: Bearer local-dev-key" \
   -H "Content-Type: application/json" \
   -d '{ "query": "maintenance issues", "limit": 5 }'
+```
+
+## Synthesize (corrective-RAG)
+
+`POST /v1/synthesize` is `/v1/search` with one extra step: the retrieved facts get fed to a generator LLM that produces a grounded, citation-bearing answer (each claim ends with `[factId]`), and then a verifier LLM judges whether every claim is supported by the source facts. Three modes:
+
+- **strict** (default) — verifier must return `supported`. Anything else (`partial` / `unsupported`) collapses to `answer: null` with a `reason` field. Fail-closed on verifier outage too.
+- **lenient** — verifier still runs, but the answer is returned regardless. The verifier's verdict is exposed via `reason` so the caller can decide.
+- **off** — skip verifier (cheapest; for callers that do their own grounding).
+
+Hallucinated `factId` citations (the LLM cited an id not in the retrieved set) are filtered before the response leaves the server. The `results` field carries the raw `SearchHit[]` so callers can fall back to manual synthesis when the answer is null.
+
+```bash
+curl -X POST http://localhost:3000/v1/synthesize \
+  -H "Authorization: Bearer $KEY" \
+  -H "Content-Type: application/json" \
+  -d '{ "query": "who reported maintenance issues last month?", "synthesisGuardrails": "strict" }'
 ```
 
 ## Bitemporal model
@@ -154,6 +172,9 @@ Each company gets its own SurrealDB database (`co_<companyId>`). Cross-tenant qu
 | `OPENAI_EMBEDDING_DIMENSIONS` | `1536` | Must match the schema's HNSW dim if HNSW is later enabled. |
 | `OPENAI_CHAT_MODEL` | `gpt-4o-mini` | Used by `ingest-mention` extraction. |
 | `CONFLICT_*` | per spec | Override the resolution weights at runtime; defaults match `core/capabilities/knowledge.yaml`. |
+| `SYNTHESIZE_MODEL` | `OPENAI_CHAT_MODEL` | Override the chat model for `/v1/synthesize` generator + verifier calls. |
+| `SYNTHESIZE_DEFAULT_GUARDRAILS` | `strict` | `strict` / `lenient` / `off`. Caller can override per-request via `synthesisGuardrails`. |
+| `SYNTHESIZE_CONCURRENCY` | `4` | Max in-flight LLM calls across synthesize requests. Each request makes 2 calls (generator + verifier in strict/lenient). |
 | `OTEL_ENABLED` | `0` | Enable OpenTelemetry tracing. When `1`, exports OTLP/HTTP traces with auto-instrumentation for `http` (so OpenAI + JWKS calls show up) + `express` (Nest). The pipeline emits explicit child spans under `search`: `vector_leg`, `lexical_leg`, `route`, `ppr`, `fetch_neighbours`, `rerank` — each annotated with candidate counts. Bring-your-own backend via `OTEL_EXPORTER_OTLP_ENDPOINT` (Jaeger / Grafana Tempo / Datadog / Honeycomb all speak OTLP). Service name defaults to `inite-brain-service`; override via `OTEL_SERVICE_NAME`. No-op when off — zero cost. |
 
 ### Retrieval feature flags

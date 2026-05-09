@@ -10,6 +10,7 @@ import { AuthModule } from './auth/auth.module';
 import { AiModule } from './ai/ai.module';
 import { IngestModule } from './ingest/ingest.module';
 import { SearchModule } from './search/search.module';
+import { SynthesizeModule } from './synthesize/synthesize.module';
 import { FactsModule } from './facts/facts.module';
 import { EntitiesModule } from './entities/entities.module';
 import { ArtifactsModule } from './artifacts/artifacts.module';
@@ -40,6 +41,7 @@ import { MetricsModule } from './metrics/metrics.module';
     AiModule,
     IngestModule,
     SearchModule,
+    SynthesizeModule,
     FactsModule,
     EntitiesModule,
     ArtifactsModule,

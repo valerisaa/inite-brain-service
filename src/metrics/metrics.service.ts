@@ -19,6 +19,7 @@ import {
  *   - search_duration_seconds                 — histogram, buckets tuned for ~ms-to-1s
  *   - search_rerank_total{outcome}            — invoked|skipped_disabled|skipped_singleton|skipped_margin
  *   - search_cross_encoder_total{outcome}     — invoked|error|skipped_disabled|skipped_singleton
+ *   - synthesize_total{outcome}               — ok|no_results|no_grounded_evidence|verifier_partial|verifier_failed|generator_error|verifier_error
  *   - retract_total / forget_total            — counters
  *   - compaction_facts_total                  — counter, summed across tenants
  *   - openai_tokens_total{kind, type}         — embed|chat × prompt|completion
@@ -64,6 +65,23 @@ export class MetricsService implements OnModuleInit {
   readonly searchRerankCount = new Counter({
     name: 'brain_search_rerank_total',
     help: 'Search reranker invocations by outcome',
+    labelNames: ['outcome'] as const,
+    registers: [this.registry],
+  });
+
+  // Synthesize outcomes:
+  //   ok                   — answer returned, supported (or guardrails=off)
+  //   no_results           — search returned zero hits
+  //   no_grounded_evidence — generator emitted the "I don't know" sentinel
+  //   verifier_partial     — verifier flagged paraphrased / inferred claims
+  //   verifier_failed      — verifier flagged unsupported claims
+  //   generator_error      — LLM generator call failed (returned closed-fail)
+  //   verifier_error       — LLM verifier call failed (strict ⇒ closed-fail)
+  // The error-counter ratio against ok/no_results tells the operator
+  // whether the synthesizer is healthy or upstream OpenAI is flaky.
+  readonly synthesizeCount = new Counter({
+    name: 'brain_synthesize_total',
+    help: 'Synthesize endpoint invocations by outcome',
     labelNames: ['outcome'] as const,
     registers: [this.registry],
   });
@@ -157,6 +175,19 @@ export class MetricsService implements OnModuleInit {
       | 'skipped_singleton',
   ): void {
     this.searchCrossEncoderCount.inc({ outcome } as LabelValues<'outcome'>);
+  }
+
+  countSynthesize(
+    outcome:
+      | 'ok'
+      | 'no_results'
+      | 'no_grounded_evidence'
+      | 'verifier_partial'
+      | 'verifier_failed'
+      | 'generator_error'
+      | 'verifier_error',
+  ): void {
+    this.synthesizeCount.inc({ outcome } as LabelValues<'outcome'>);
   }
 
   countRetract(): void {
