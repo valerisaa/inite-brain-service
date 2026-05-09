@@ -190,6 +190,13 @@ export interface Scenario {
    * metric — % assertions that passed across the suite.
    */
   memoryAssertions?: MemoryAssertion[];
+  /**
+   * Optional MIA (Membership Inference Attack) tests. Run AFTER
+   * memoryAssertions, BEFORE queries. Each test computes AUC over
+   * top-hit scores for forgotten names vs control names; aggregated
+   * into the `privacy-leakage-mia-auc` metric.
+   */
+  miaTests?: MiaTest[];
 }
 
 // ── Metric outputs (per scenario / aggregate) ─────────────────────────
@@ -237,6 +244,44 @@ export interface MemoryAssertionResult {
   detail?: string;
 }
 
+// ── Privacy-leakage / MIA test ────────────────────────────────────────
+// MUSE-aligned "did we actually forget" check. Run AFTER setup
+// (forgets included) so the score distributions reflect post-forget
+// state. The harness queries each name and records the top-hit score;
+// the metric layer computes AUC over the two distributions.
+
+export interface MiaTest {
+  /** Free-text label surfaced in the report. */
+  description: string;
+  /**
+   * Names of entities we've forgotten. We expect search-by-name on
+   * these to return low scores (entity vanished, no residual cluster).
+   */
+  forgottenNames: string[];
+  /**
+   * Random names that were NEVER ingested. Distributional control —
+   * if forgotten and control distributions look the same, the
+   * forget cascade is regulatorily clean.
+   */
+  controlNames: string[];
+  /**
+   * AUC pass threshold. Default 0.6 (MUSE convention). AUC > threshold
+   * is a legal-finding-grade leak.
+   */
+  threshold?: number;
+}
+
+export interface MiaTestResult {
+  scenarioId: string;
+  description: string;
+  auc: number;
+  threshold: number;
+  passed: boolean;
+  forgottenN: number;
+  controlN: number;
+  detail?: string;
+}
+
 export interface ScenarioOutcome {
   scenarioId: string;
   vertical: Vertical;
@@ -244,6 +289,7 @@ export interface ScenarioOutcome {
   extractionResults: ExtractionResult[];
   identityMergeResult?: IdentityMergeResult;
   memoryAssertionResults: MemoryAssertionResult[];
+  miaTestResults: MiaTestResult[];
 }
 
 export interface AggregateMetric {

@@ -561,6 +561,53 @@ export function buildFatTenant(opts: FatTenantOpts = {}): FatTenantFixture {
     });
   }
 
+  // MIA / privacy-leakage test. Forgotten customer names are the
+  // positives; we synthesise a same-size set of CONTROL names that
+  // were never ingested. AUC ≤ 0.6 ⇒ regulator-defensible "model
+  // has forgotten" — top-hit scores for forgotten names are
+  // statistically indistinguishable from totally-novel names. We
+  // bound to PROBE_LIMIT × 2 to keep the eval runtime sane.
+  const forgottenForMia = forgottenCustomers.slice(0, PROBE_LIMIT * 2);
+  const miaTests: Scenario['miaTests'] = [];
+  if (forgottenForMia.length >= 2) {
+    // Generate control names from the same name pool as the dataset
+    // so the score distribution doesn't trivially differ on linguistic
+    // shape (a "Smith" vs "Müller" prior would flag without leakage).
+    // We just verify they're not in the forgotten set or the active
+    // dataset to avoid accidental collisions.
+    const usedNames = new Set([
+      ...forgottenForMia.map((fc) => fc.fullName),
+      // Active set: every customer that wasn't forgotten. We don't
+      // want a "Maria Schmidt" control colliding with a still-active
+      // "Maria Schmidt" customer — that's a false positive.
+    ]);
+    // To populate `usedNames` with the active customer names we'd
+    // need to thread them through; for the MIA test the simpler
+    // shape is to use names with a distinctive suffix that the
+    // dataset can't have.
+    const controlNames: string[] = [];
+    let attempts = 0;
+    while (
+      controlNames.length < forgottenForMia.length &&
+      attempts < forgottenForMia.length * 10
+    ) {
+      attempts++;
+      const candidate = `${pick(FIRST_NAMES)} ${pick(LAST_NAMES)} Mia${attempts}`;
+      if (!usedNames.has(candidate)) {
+        controlNames.push(candidate);
+        usedNames.add(candidate);
+      }
+    }
+    if (controlNames.length === forgottenForMia.length) {
+      miaTests.push({
+        description: `forgotten ${forgottenForMia.length} customers vs control names — AUC must stay near 0.5 (no privacy leakage)`,
+        forgottenNames: forgottenForMia.map((fc) => fc.fullName),
+        controlNames,
+        threshold: 0.6,
+      });
+    }
+  }
+
   return {
     scenarios: [
       {
@@ -571,6 +618,7 @@ export function buildFatTenant(opts: FatTenantOpts = {}): FatTenantFixture {
         setup,
         queries,
         memoryAssertions,
+        miaTests: miaTests.length > 0 ? miaTests : undefined,
       },
     ],
     stats: {

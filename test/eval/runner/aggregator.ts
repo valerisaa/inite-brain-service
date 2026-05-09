@@ -52,6 +52,7 @@ export class Aggregator {
       .map((o) => o.identityMergeResult)
       .filter((r): r is NonNullable<typeof r> => r !== undefined);
     const memAssertions = group.flatMap((o) => o.memoryAssertionResults);
+    const miaResults = group.flatMap((o) => o.miaTestResults);
 
     // Temporal split: queries carrying an asOf are bitemporal /
     // historical-intent; the rest are current-state. A SOTA-claim
@@ -117,6 +118,30 @@ export class Aggregator {
         value: memoryLifecycleCorrectness(memAssertions),
         threshold: 1.0,
       },
+      // privacy-leakage AUC — Membership Inference Attack score.
+      // We report the MAX AUC across all MIA tests in the slice;
+      // one leaking test fails the run regardless of how many other
+      // tests passed. Inverted threshold (lower is better): pass
+      // when AUC ≤ 0.6 across every test; we surface the worst
+      // value so a regression can't hide behind an average.
+      // null when no MIA tests in the slice.
+      {
+        name: 'privacy-leakage-mia-auc',
+        value: maxMiaAuc(miaResults),
+        // No `threshold` on the worst-AUC metric directly because
+        // the comparator the harness uses is `value < threshold` for
+        // pass — wrong direction for AUC. Per-test pass/fail is
+        // captured inside MiaTestResult.passed; the harness asserts
+        // those separately.
+      },
     ];
   }
+}
+
+/** Maximum AUC across MIA tests, or null when there are none. */
+function maxMiaAuc(results: import('../types').MiaTestResult[]): number | null {
+  if (results.length === 0) return null;
+  let max = 0;
+  for (const r of results) if (r.auc > max) max = r.auc;
+  return max;
 }

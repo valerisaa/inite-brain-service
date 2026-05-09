@@ -55,6 +55,22 @@ export class Reporter {
       }
     }
 
+    // MIA / privacy leakage — show ALL tests run, not just failures,
+    // because the AUC value itself is informative even on a pass.
+    // Operators want to see "how close are we to the regulatory line"
+    // not just "did we cross it".
+    const miaTests = report.outcomes.flatMap((o) => o.miaTestResults);
+    if (miaTests.length > 0) {
+      lines.push('', '### Privacy leakage (MIA AUC)', '');
+      lines.push('| scenario | description | AUC | threshold | pass |');
+      lines.push('|---|---|---|---|---|');
+      for (const m of miaTests) {
+        lines.push(
+          `| ${m.scenarioId} | ${this.shorten(m.description)} | ${m.auc.toFixed(3)} | ${m.threshold.toFixed(2)} | ${m.passed ? '✓' : '✗'} |`,
+        );
+      }
+    }
+
     return lines.join('\n');
   }
 

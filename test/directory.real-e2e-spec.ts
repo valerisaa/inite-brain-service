@@ -34,6 +34,7 @@ import {
   EvalRunner,
   Reporter,
   MemoryAssertionsChecker,
+  MiaChecker,
 } from './eval/runner';
 
 describe('Directory eval (jumbo tenant + memory lifecycle)', () => {
@@ -112,6 +113,7 @@ describe('Directory eval (jumbo tenant + memory lifecycle)', () => {
           new SetupApplier(fullClient),
           new QueryExecutor(fullClient, limitedClient),
           new MemoryAssertionsChecker(fullClient),
+          new MiaChecker(fullClient),
         ),
         new Aggregator(),
       );
@@ -130,6 +132,9 @@ describe('Directory eval (jumbo tenant + memory lifecycle)', () => {
       const memoryFailures = report.outcomes.flatMap((o) =>
         o.memoryAssertionResults.filter((a) => !a.passed),
       );
+      const miaFailures = report.outcomes.flatMap((o) =>
+        o.miaTestResults.filter((m) => !m.passed),
+      );
       const queryFailures = report.outcomes
         .flatMap((o) => o.queryResults)
         .filter((q) => q.rankOfExpected === 0 || q.rankOfExpected > 3);
@@ -137,10 +142,14 @@ describe('Directory eval (jumbo tenant + memory lifecycle)', () => {
         memoryFailures: memoryFailures.map(
           (m) => `${m.scenarioId} ${m.kind}: ${m.description} — ${m.detail ?? ''}`,
         ),
+        miaFailures: miaFailures.map(
+          (m) =>
+            `${m.scenarioId} privacy leak: AUC=${m.auc.toFixed(3)} > ${m.threshold.toFixed(2)} — ${m.description}`,
+        ),
         queryFailures: queryFailures.map(
           (q) => `${q.query} → rank ${q.rankOfExpected}`,
         ),
-      }).toEqual({ memoryFailures: [], queryFailures: [] });
+      }).toEqual({ memoryFailures: [], miaFailures: [], queryFailures: [] });
     },
     1_800_000, // 30 min — seeding 5-8k facts is slow without LLM batching
   );

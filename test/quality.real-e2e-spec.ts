@@ -17,6 +17,7 @@ import {
   EvalRunner,
   Reporter,
   MemoryAssertionsChecker,
+  MiaChecker,
 } from './eval/runner';
 
 describe('Quality eval (real OpenAI, multi-vertical scenarios)', () => {
@@ -46,6 +47,7 @@ describe('Quality eval (real OpenAI, multi-vertical scenarios)', () => {
         new SetupApplier(fullClient),
         new QueryExecutor(fullClient, limitedClient),
         new MemoryAssertionsChecker(fullClient),
+        new MiaChecker(fullClient),
       ),
       new Aggregator(),
     );

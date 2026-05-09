@@ -33,6 +33,7 @@ import {
   EvalRunner,
   Reporter,
   MemoryAssertionsChecker,
+  MiaChecker,
 } from './eval/runner';
 
 describe('JSON-directory eval (load + retrieval + lifecycle)', () => {
@@ -87,6 +88,7 @@ describe('JSON-directory eval (load + retrieval + lifecycle)', () => {
           new SetupApplier(fullClient),
           new QueryExecutor(fullClient, limitedClient),
           new MemoryAssertionsChecker(fullClient),
+          new MiaChecker(fullClient),
         ),
         new Aggregator(),
       );

@@ -28,6 +28,7 @@ import {
   EvalRunner,
   Reporter,
   MemoryAssertionsChecker,
+  MiaChecker,
 } from './eval/runner';
 
 describe('Fat-tenant retrieval eval', () => {
@@ -79,6 +80,7 @@ describe('Fat-tenant retrieval eval', () => {
           new SetupApplier(fullClient),
           new QueryExecutor(fullClient, limitedClient),
           new MemoryAssertionsChecker(fullClient),
+          new MiaChecker(fullClient),
         ),
         new Aggregator(),
       );
