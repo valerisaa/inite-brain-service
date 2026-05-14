@@ -184,6 +184,8 @@ export class SetupApplier {
         survivorRef: merge.survivorRef,
         loserRef: merge.loserRef,
         merged: false,
+        falseMerges: [],
+        unresolvedDistractors: merge.shouldNotMerge ?? [],
       };
     }
     // If both refs resolve to the same entity, merge has already
@@ -191,36 +193,57 @@ export class SetupApplier {
     // re-attributes loser → survivor and now exposes both externalRefs
     // on the survivor record). Skip the redundant link call —
     // attempting it as a self-edge breaks the metric.
+    let merged: boolean;
     if (survivor === loser) {
-      return {
-        scenarioId: scenario.id,
-        survivorRef: merge.survivorRef,
-        loserRef: merge.loserRef,
-        merged: true,
-      };
+      merged = true;
+    } else {
+      try {
+        const linkRes = await this.brain.ingest.link({
+          from: { entityId: survivor },
+          to: { entityId: loser },
+          kind: 'identity_of',
+          source: { vertical: 'cross' },
+        });
+        // The link returned an edgeId. The mergedAt/mergedInto fields
+        // aren't yet exposed on the v1 read endpoints, so for the eval we
+        // accept a successful link call (with a non-null edgeId) as proof
+        // the merge ran. The fromEntityId echo is normalized server-side
+        // (may strip the table prefix), so we don't compare it.
+        merged = !!linkRes.edgeId;
+      } catch {
+        merged = false;
+      }
     }
-    let merged = false;
-    try {
-      const linkRes = await this.brain.ingest.link({
-        from: { entityId: survivor },
-        to: { entityId: loser },
-        kind: 'identity_of',
-        source: { vertical: 'cross' },
-      });
-      // The link returned an edgeId. The mergedAt/mergedInto fields
-      // aren't yet exposed on the v1 read endpoints, so for the eval we
-      // accept a successful link call (with a non-null edgeId) as proof
-      // the merge ran. The fromEntityId echo is normalized server-side
-      // (may strip the table prefix), so we don't compare it.
-      merged = !!linkRes.edgeId;
-    } catch {
-      merged = false;
+
+    // After the (intended) merge has been attempted, walk the
+    // shouldNotMerge distractors. Re-resolve each one — if it now
+    // points at the same entityId as the survivor, brain over-merged.
+    const falseMerges: string[] = [];
+    const unresolvedDistractors: string[] = [];
+    if (merge.shouldNotMerge) {
+      // Survivor's entityId might have been normalized post-merge.
+      // Re-resolve to be safe.
+      const survivorPostMerge =
+        (await this.findEntityIdByRef(merge.survivorRef)) ?? survivor;
+      for (const ref of merge.shouldNotMerge) {
+        const distractor = await this.findEntityIdByRef(ref);
+        if (!distractor) {
+          unresolvedDistractors.push(ref);
+          continue;
+        }
+        if (distractor === survivorPostMerge) {
+          falseMerges.push(ref);
+        }
+      }
     }
+
     return {
       scenarioId: scenario.id,
       survivorRef: merge.survivorRef,
       loserRef: merge.loserRef,
       merged,
+      falseMerges,
+      unresolvedDistractors,
     };
   }
 

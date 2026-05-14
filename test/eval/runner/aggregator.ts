@@ -10,7 +10,7 @@ import {
   meanReciprocalRank,
   extractionRecall,
   entityExtractionRate,
-  identityResolutionRate,
+  identityResolutionMetrics,
   piiGatingCorrectness,
   memoryLifecycleCorrectness,
   ndcgAtK,
@@ -102,7 +102,13 @@ export class Aggregator {
         value: entityExtractionRate(extractions),
         threshold: 0.7,
       },
-      { name: 'identity-resolution', value: identityResolutionRate(merges) },
+      // Identity-resolution: precision / recall / F1 over identity_of
+      // intents. Recall = declared merges that succeeded; precision =
+      // declared distractors NOT over-merged. The old single-rate
+      // metric was blind to false merges (a placebo). Threshold is
+      // attached to F1 only — precision/recall are reported alongside
+      // for debuggability.
+      ...identityMergeMetrics(merges),
       {
         name: 'pii-gating-correctness',
         value: piiGatingCorrectness(queries),
@@ -144,4 +150,20 @@ function maxMiaAuc(results: import('../types').MiaTestResult[]): number | null {
   let max = 0;
   for (const r of results) if (r.auc > max) max = r.auc;
   return max;
+}
+
+/**
+ * Identity-resolution metrics flattened to AggregateMetric rows. F1
+ * carries the gating threshold; precision and recall ride alongside
+ * with no threshold (so an F1 dip doesn't double-fire at the gate).
+ */
+function identityMergeMetrics(
+  merges: import('../types').IdentityMergeResult[],
+): AggregateMetric[] {
+  const m = identityResolutionMetrics(merges);
+  return [
+    { name: 'identity-resolution-f1', value: m.f1, threshold: 0.8 },
+    { name: 'identity-resolution-precision', value: m.precision },
+    { name: 'identity-resolution-recall', value: m.recall },
+  ];
 }

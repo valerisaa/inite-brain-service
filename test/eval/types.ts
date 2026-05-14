@@ -179,10 +179,21 @@ export interface Scenario {
   /**
    * Optional cross-vertical assertion: the entity at expectedSurvivor
    * should absorb the entity at expectedLoser after an identity_of link.
+   * Optional `shouldNotMerge` lists distractor refs that must remain
+   * distinct from the survivor — used to compute identity-resolution
+   * precision (a metric blind to false merges is placebo).
    */
   identityMerge?: {
     survivorRef: string; // '<vertical>.<id>'
     loserRef: string;
+    /**
+     * Refs that must NOT be merged into the survivor. Each one is
+     * checked AFTER the identity_of link is created: the harness
+     * resolves the distractor's entityId and asserts it is different
+     * from the survivor's entityId. Resolution failure (the distractor
+     * has no facts ingested) is treated as a setup error, not a pass.
+     */
+    shouldNotMerge?: string[];
   };
   /**
    * Optional memory-lifecycle assertions. Run AFTER setup, BEFORE
@@ -232,7 +243,20 @@ export interface IdentityMergeResult {
   scenarioId: string;
   survivorRef: string;
   loserRef: string;
+  /** True when the survivor↔loser identity_of link was accepted. */
   merged: boolean;
+  /**
+   * Refs from the scenario's shouldNotMerge list that the harness
+   * resolved to the SAME entity as the survivor — i.e. brain over-merged.
+   * Empty when no distractors were declared OR no over-merge happened.
+   */
+  falseMerges: string[];
+  /**
+   * Refs from shouldNotMerge that could not be resolved (no entity
+   * surfaced for the externalRef). Surfaced as a setup-misconfig signal
+   * so a distractor with no ingested facts doesn't masquerade as a pass.
+   */
+  unresolvedDistractors: string[];
 }
 
 export interface MemoryAssertionResult {
