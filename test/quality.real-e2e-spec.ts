@@ -8,8 +8,10 @@
  */
 import { resolve } from 'node:path';
 import { existsSync, readFileSync } from 'node:fs';
+import OpenAI from 'openai';
 import { BrainClient } from '@inite/knowledge';
 import { spawnService, SpawnedService } from './spawn';
+import { loadOpenAiKey } from './spawn/openai-key-loader';
 import { allScenarios } from './eval/scenarios';
 import { loadDirectoryJson } from './eval/loaders/json-directory.loader';
 import { buildQueryBankFromDirectory } from './eval/loaders/directory-query-bank';
@@ -22,6 +24,7 @@ import {
   Reporter,
   MemoryAssertionsChecker,
   MiaChecker,
+  FaithfulnessChecker,
 } from './eval/runner';
 import type { Scenario } from './eval/types';
 
@@ -47,12 +50,18 @@ describe('Quality eval (real OpenAI, multi-vertical scenarios)', () => {
     const fullClient = new BrainClient({ ...sdkOpts, apiKey: svc.primary.plaintext });
     const limitedClient = new BrainClient({ ...sdkOpts, apiKey: svc.extras[0].plaintext });
 
+    // Faithfulness verifier needs its own OpenAI client — runs in the
+    // test process (the metric file lives outside Nest's container so
+    // it stays unit-testable). Pinned model snapshot mirrors the one
+    // spawn-service hands the brain process.
+    const openai = new OpenAI({ apiKey: loadOpenAiKey() });
     const runner = new EvalRunner(
       new ScenarioRunner(
         new SetupApplier(fullClient),
         new QueryExecutor(fullClient, limitedClient),
         new MemoryAssertionsChecker(fullClient),
         new MiaChecker(fullClient),
+        new FaithfulnessChecker(fullClient, openai, 'gpt-4o-mini-2024-07-18'),
       ),
       new Aggregator(),
     );
@@ -143,7 +152,10 @@ function loadDirectoryScenarios(): Scenario[] {
     ?.split(',')
     .map((p) => p.trim())
     .filter(Boolean);
-  const defaultPaths = ['test/eval/fixtures/wd-russian-writers.json'];
+  const defaultPaths = [
+    'test/eval/fixtures/wd-russian-writers.json',
+    'test/eval/fixtures/wd-russian-writers-ru.json',
+  ];
   const paths = explicitPaths && explicitPaths.length > 0 ? explicitPaths : defaultPaths;
 
   const sample = parseInt(process.env.BRAIN_EVAL_DIRECTORY_SAMPLE ?? '30', 10);

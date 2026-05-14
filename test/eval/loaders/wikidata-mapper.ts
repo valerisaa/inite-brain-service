@@ -59,6 +59,24 @@ SELECT DISTINCT ?item ?itemLabel ?dob ?birthPlaceLabel ?occupationLabel ?genreLa
 LIMIT $LIMIT
     `.trim(),
   },
+  'russian-writers-cyrillic': {
+    directoryName: 'wd_russian_writers_ru',
+    description:
+      'Wikidata: same writers cohort as `russian-writers`, but labels resolved in Russian first (Cyrillic). Stress-tests retrieval against native-script names — the canonical case for Russian-speaking operators searching their own data, which the Latin transliteration fixture sidesteps.',
+    sparql: `
+SELECT DISTINCT ?item ?itemLabel ?dob ?birthPlaceLabel ?occupationLabel ?genreLabel WHERE {
+  ?item wdt:P31 wd:Q5;
+        wdt:P106 wd:Q36180;
+        wdt:P1412 wd:Q7737.
+  OPTIONAL { ?item wdt:P569 ?dob. }
+  OPTIONAL { ?item wdt:P19 ?birthPlace. }
+  OPTIONAL { ?item wdt:P106 ?occupation. FILTER (?occupation != wd:Q36180) }
+  OPTIONAL { ?item wdt:P136 ?genre. }
+  SERVICE wikibase:label { bd:serviceParam wikibase:language "ru,en". }
+}
+LIMIT $LIMIT
+    `.trim(),
+  },
   'nobel-laureates-literature': {
     directoryName: 'wd_nobel_literature',
     description:
