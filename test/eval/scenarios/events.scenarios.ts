@@ -68,6 +68,76 @@ export const eventsScenarios: Scenario[] = [
         query: 'who had seating issues at the jazz night',
         expectedTopEntityRef: 'events.irene',
       },
+      {
+        query: 'Irene Holm',
+        expectedTopEntityRef: 'events.irene',
+        expectedFactPredicate: 'name',
+      },
+      {
+        query: 'platinum tier attendee at The Grove',
+        expectedTopEntityRef: 'events.irene',
+        expectedFactPredicate: 'tier',
+      },
+    ],
+  },
+  {
+    id: 'events.repeat-buyer-refund',
+    vertical: 'events',
+    description:
+      'Repeat ticket buyer requested a refund after a cancelled show. Covers refund-intent classification (intent vs complained_about disambiguation) and email-as-PII gating.',
+    setup: [
+      {
+        kind: 'fact',
+        entityRef: { vertical: 'events', id: 'noah' },
+        predicate: 'name',
+        object: 'Noah Berggren',
+        validFrom: ISO('2026-04-01'),
+        source: { vertical: 'events' },
+      },
+      {
+        kind: 'fact',
+        entityRef: { vertical: 'events', id: 'noah' },
+        predicate: 'email',
+        object: 'noah.berggren@example.com',
+        validFrom: ISO('2026-04-01'),
+        confidence: 0.95,
+        source: { vertical: 'events' },
+      },
+      {
+        kind: 'fact',
+        entityRef: { vertical: 'events', id: 'noah' },
+        predicate: 'interacted_with',
+        object: 'purchased: indie rock show at Veranda',
+        validFrom: ISO('2026-04-15'),
+        source: { vertical: 'events', eventId: 'storefront.order.created' },
+      },
+      {
+        kind: 'fact',
+        entityRef: { vertical: 'events', id: 'noah' },
+        predicate: 'intent',
+        object: 'requested refund after Veranda cancellation',
+        validFrom: ISO('2026-04-28'),
+        source: { vertical: 'events' },
+      },
+    ],
+    queries: [
+      {
+        query: 'attendees who asked for a refund',
+        expectedTopEntityRef: 'events.noah',
+        expectedFactPredicate: 'intent',
+      },
+      {
+        query: 'who bought tickets to the Veranda show',
+        expectedTopEntityRef: 'events.noah',
+        expectedFactPredicate: 'interacted_with',
+      },
+      // PII gating — email is sensitive; non-PII caller must not see it.
+      {
+        query: 'Noah Berggren contact email',
+        expectedTopEntityRef: 'events.noah',
+        callerScopes: ['brain:read'],
+        mustNotLeakPredicate: 'email',
+      },
     ],
   },
 ];

@@ -71,6 +71,73 @@ export const healthScenarios: Scenario[] = [
         callerScopes: ['brain:read', 'brain:read_pii'],
         expectedFactPredicate: 'address',
       },
+      {
+        query: 'Karin Lindgren date of birth',
+        expectedTopEntityRef: 'health.patient_42',
+        callerScopes: ['brain:read', 'brain:read_pii'],
+        expectedFactPredicate: 'dob',
+      },
+    ],
+  },
+  {
+    id: 'health.appointment-and-symptom',
+    vertical: 'health',
+    description:
+      'Patient with reported symptom + scheduled follow-up. Covers reported_symptom predicate (uncommon class — small-N coverage today) and PII-gated phone number alongside non-PII appointment data.',
+    setup: [
+      {
+        kind: 'fact',
+        entityRef: { vertical: 'health', id: 'patient_77' },
+        predicate: 'name',
+        object: 'Tomás Iglesias',
+        validFrom: ISO('2026-04-10'),
+        confidence: 0.95,
+        source: { vertical: 'health' },
+      },
+      {
+        kind: 'fact',
+        entityRef: { vertical: 'health', id: 'patient_77' },
+        predicate: 'phone',
+        object: '+34 600 123 456',
+        validFrom: ISO('2026-04-10'),
+        confidence: 0.95,
+        source: { vertical: 'health' },
+      },
+      {
+        kind: 'fact',
+        entityRef: { vertical: 'health', id: 'patient_77' },
+        predicate: 'reported_symptom',
+        object: 'persistent migraine, photophobia',
+        validFrom: ISO('2026-04-12'),
+        source: { vertical: 'health' },
+      },
+      {
+        kind: 'fact',
+        entityRef: { vertical: 'health', id: 'patient_77' },
+        predicate: 'interacted_with',
+        object: 'scheduled follow-up: 2026-05-15 with Dr Mendes',
+        validFrom: ISO('2026-04-12'),
+        source: { vertical: 'health' },
+      },
+    ],
+    queries: [
+      {
+        query: 'patients with migraine symptoms',
+        expectedTopEntityRef: 'health.patient_77',
+        expectedFactPredicate: 'reported_symptom',
+      },
+      {
+        query: 'who scheduled a follow-up with Dr Mendes',
+        expectedTopEntityRef: 'health.patient_77',
+        expectedFactPredicate: 'interacted_with',
+      },
+      // Phone number — PII; non-PII caller must not see it.
+      {
+        query: 'Tomás Iglesias phone',
+        expectedTopEntityRef: 'health.patient_77',
+        callerScopes: ['brain:read'],
+        mustNotLeakPredicate: 'phone',
+      },
     ],
   },
 ];

@@ -181,4 +181,251 @@ export const bitemporalScenarios: Scenario[] = [
       },
     ],
   },
+
+  // ── Allen relation matrix ────────────────────────────────────────
+  // Compact coverage of the 13 Allen interval relations beyond
+  // before/after/meets that the earlier scenarios already exercised.
+  // Each scenario seeds one entity with two competing facts of the
+  // same predicate whose validFrom/validUntil intervals stand in the
+  // named Allen relation, then queries at asOf points that
+  // discriminate which fact is active. Entity-level recall is the
+  // gate; per-fact assertions belong on /v1/entities/:id/facts?asOf.
+
+  {
+    id: 'bitemp.allen.contains',
+    vertical: 'rent',
+    description:
+      'Allen "contains": A=[Jan,Dec] contains B=[Mar,Sep]. asOf inside B reads B; asOf in A but outside B reads A.',
+    setup: [
+      {
+        kind: 'fact',
+        entityRef: { vertical: 'rent', id: 'allen_contains' },
+        predicate: 'name',
+        object: 'Yara Castillo',
+        validFrom: ISO('2026-01-01'),
+        source: { vertical: 'rent' },
+      },
+      // A: long-running base subscription
+      {
+        kind: 'fact',
+        entityRef: { vertical: 'rent', id: 'allen_contains' },
+        predicate: 'tier',
+        object: 'silver',
+        validFrom: ISO('2026-01-01'),
+        validUntil: ISO('2026-12-31'),
+        source: { vertical: 'rent' },
+      },
+      // B: contained promotional upgrade overrides A in [Mar,Sep]
+      {
+        kind: 'fact',
+        entityRef: { vertical: 'rent', id: 'allen_contains' },
+        predicate: 'tier',
+        object: 'gold',
+        validFrom: ISO('2026-03-01'),
+        validUntil: ISO('2026-09-30'),
+        source: { vertical: 'rent' },
+      },
+    ],
+    queries: [
+      { query: 'Yara Castillo', expectedTopEntityRef: 'rent.allen_contains', asOf: ISO('2026-02-15') },
+      { query: 'Yara Castillo', expectedTopEntityRef: 'rent.allen_contains', asOf: ISO('2026-06-15') },
+      { query: 'Yara Castillo', expectedTopEntityRef: 'rent.allen_contains', asOf: ISO('2026-11-15') },
+    ],
+  },
+
+  {
+    id: 'bitemp.allen.starts',
+    vertical: 'rent',
+    description:
+      'Allen "starts": A=[Apr,Jun] starts B=[Apr,Sep]. Same start, A ends before B. asOf in [Apr,Jun] sees both; asOf in [Jun,Sep] sees only B.',
+    setup: [
+      {
+        kind: 'fact',
+        entityRef: { vertical: 'rent', id: 'allen_starts' },
+        predicate: 'name',
+        object: 'Tomas Alvarez',
+        validFrom: ISO('2026-04-01'),
+        source: { vertical: 'rent' },
+      },
+      {
+        kind: 'fact',
+        entityRef: { vertical: 'rent', id: 'allen_starts' },
+        predicate: 'preference',
+        object: 'trial discount applied',
+        validFrom: ISO('2026-04-01'),
+        validUntil: ISO('2026-06-30'),
+        source: { vertical: 'rent' },
+      },
+      {
+        kind: 'fact',
+        entityRef: { vertical: 'rent', id: 'allen_starts' },
+        predicate: 'preference',
+        object: 'auto-renew enabled',
+        validFrom: ISO('2026-04-01'),
+        validUntil: ISO('2026-09-30'),
+        source: { vertical: 'rent' },
+      },
+    ],
+    queries: [
+      { query: 'Tomas Alvarez', expectedTopEntityRef: 'rent.allen_starts', asOf: ISO('2026-05-15') },
+      { query: 'Tomas Alvarez', expectedTopEntityRef: 'rent.allen_starts', asOf: ISO('2026-08-15') },
+    ],
+  },
+
+  {
+    id: 'bitemp.allen.finishes',
+    vertical: 'rent',
+    description:
+      'Allen "finishes": A=[Jul,Sep] finishes B=[Apr,Sep]. Same end, A starts after B. asOf in [Jul,Sep] sees both; asOf in [Apr,Jul) sees only B.',
+    setup: [
+      {
+        kind: 'fact',
+        entityRef: { vertical: 'rent', id: 'allen_finishes' },
+        predicate: 'name',
+        object: 'Mei Zhao',
+        validFrom: ISO('2026-04-01'),
+        source: { vertical: 'rent' },
+      },
+      {
+        kind: 'fact',
+        entityRef: { vertical: 'rent', id: 'allen_finishes' },
+        predicate: 'status',
+        object: 'paying',
+        validFrom: ISO('2026-04-01'),
+        validUntil: ISO('2026-09-30'),
+        source: { vertical: 'rent' },
+      },
+      {
+        kind: 'fact',
+        entityRef: { vertical: 'rent', id: 'allen_finishes' },
+        predicate: 'status',
+        object: 'overdue',
+        validFrom: ISO('2026-07-01'),
+        validUntil: ISO('2026-09-30'),
+        source: { vertical: 'rent' },
+      },
+    ],
+    queries: [
+      { query: 'Mei Zhao', expectedTopEntityRef: 'rent.allen_finishes', asOf: ISO('2026-05-15') },
+      { query: 'Mei Zhao', expectedTopEntityRef: 'rent.allen_finishes', asOf: ISO('2026-08-15') },
+    ],
+  },
+
+  {
+    id: 'bitemp.allen.equals',
+    vertical: 'rent',
+    description:
+      'Allen "equals": A and B share identical [validFrom, validUntil]. Both should surface at any asOf in the interval. Tests that the bitemporal cut does not arbitrarily prefer one over the other based on recordedAt insertion order.',
+    setup: [
+      {
+        kind: 'fact',
+        entityRef: { vertical: 'rent', id: 'allen_equals' },
+        predicate: 'name',
+        object: 'Priya Iyengar',
+        validFrom: ISO('2026-04-01'),
+        source: { vertical: 'rent' },
+      },
+      {
+        kind: 'fact',
+        entityRef: { vertical: 'rent', id: 'allen_equals' },
+        predicate: 'preference',
+        object: 'morning calls preferred',
+        validFrom: ISO('2026-05-01'),
+        validUntil: ISO('2026-08-01'),
+        source: { vertical: 'rent' },
+      },
+      {
+        kind: 'fact',
+        entityRef: { vertical: 'rent', id: 'allen_equals' },
+        predicate: 'preference',
+        object: 'reminders via SMS',
+        validFrom: ISO('2026-05-01'),
+        validUntil: ISO('2026-08-01'),
+        source: { vertical: 'rent' },
+      },
+    ],
+    queries: [
+      { query: 'Priya Iyengar', expectedTopEntityRef: 'rent.allen_equals', asOf: ISO('2026-06-15') },
+    ],
+  },
+
+  {
+    id: 'bitemp.allen.overlapped-by',
+    vertical: 'rent',
+    description:
+      'Allen "overlapped_by": B=[Apr,Jul] is overlapped_by A=[Jun,Sep]. asOf in [Apr,Jun) sees only B; in [Jun,Jul] sees both; in (Jul,Sep] sees only A.',
+    setup: [
+      {
+        kind: 'fact',
+        entityRef: { vertical: 'rent', id: 'allen_overlapped_by' },
+        predicate: 'name',
+        object: 'Ravi Sharma',
+        validFrom: ISO('2026-04-01'),
+        source: { vertical: 'rent' },
+      },
+      {
+        kind: 'fact',
+        entityRef: { vertical: 'rent', id: 'allen_overlapped_by' },
+        predicate: 'tier',
+        object: 'standard',
+        validFrom: ISO('2026-04-01'),
+        validUntil: ISO('2026-07-31'),
+        source: { vertical: 'rent' },
+      },
+      {
+        kind: 'fact',
+        entityRef: { vertical: 'rent', id: 'allen_overlapped_by' },
+        predicate: 'tier',
+        object: 'premium',
+        validFrom: ISO('2026-06-15'),
+        validUntil: ISO('2026-09-30'),
+        source: { vertical: 'rent' },
+      },
+    ],
+    queries: [
+      { query: 'Ravi Sharma', expectedTopEntityRef: 'rent.allen_overlapped_by', asOf: ISO('2026-05-15') },
+      { query: 'Ravi Sharma', expectedTopEntityRef: 'rent.allen_overlapped_by', asOf: ISO('2026-07-01') },
+      { query: 'Ravi Sharma', expectedTopEntityRef: 'rent.allen_overlapped_by', asOf: ISO('2026-08-15') },
+    ],
+  },
+
+  {
+    id: 'bitemp.allen.during',
+    vertical: 'rent',
+    description:
+      'Allen "during": A=[Apr,Jun] is during B=[Jan,Dec]. asOf in [Apr,Jun] sees both; otherwise only B. Mirror of "contains" from the inner interval`s perspective.',
+    setup: [
+      {
+        kind: 'fact',
+        entityRef: { vertical: 'rent', id: 'allen_during' },
+        predicate: 'name',
+        object: 'Olu Adebayo',
+        validFrom: ISO('2026-01-01'),
+        source: { vertical: 'rent' },
+      },
+      {
+        kind: 'fact',
+        entityRef: { vertical: 'rent', id: 'allen_during' },
+        predicate: 'tier',
+        object: 'enterprise',
+        validFrom: ISO('2026-01-01'),
+        validUntil: ISO('2026-12-31'),
+        source: { vertical: 'rent' },
+      },
+      {
+        kind: 'fact',
+        entityRef: { vertical: 'rent', id: 'allen_during' },
+        predicate: 'preference',
+        object: 'beta-program participant',
+        validFrom: ISO('2026-04-01'),
+        validUntil: ISO('2026-06-30'),
+        source: { vertical: 'rent' },
+      },
+    ],
+    queries: [
+      { query: 'Olu Adebayo', expectedTopEntityRef: 'rent.allen_during', asOf: ISO('2026-02-15') },
+      { query: 'Olu Adebayo', expectedTopEntityRef: 'rent.allen_during', asOf: ISO('2026-05-15') },
+      { query: 'Olu Adebayo', expectedTopEntityRef: 'rent.allen_during', asOf: ISO('2026-09-15') },
+    ],
+  },
 ];
