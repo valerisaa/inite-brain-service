@@ -123,10 +123,47 @@ jobs:
       - name: Install
         run: pnpm install --frozen-lockfile --ignore-workspace
 
+      # Baseline cache. On every job we restore the most recent
+      # eval-report.json from a previous green main; the post-eval
+      # diff step compares current numbers against it. Cache key is
+      # uniquified by github.run_id so each successful main run
+      # writes a fresh entry (without overwriting the prior one),
+      # and the restoreKeys prefix matches any earlier entry for the
+      # delta-gate to find.
+      - name: Restore eval baseline
+        id: baseline-cache
+        uses: actions/cache@v4
+        with:
+          path: .eval-baseline/main.json
+          key: eval-baseline-main-${{ github.run_id }}
+          restore-keys: |
+            eval-baseline-main-
+
       - name: Quality eval (multi-vertical, real OpenAI)
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          # Tells the spec to write a machine-readable JSON report
+          # alongside the human markdown — consumed by the diff step.
+          BRAIN_EVAL_REPORT_OUT: .eval-current/report.json
         run: pnpm test:eval
+
+      - name: Compare to baseline (delta-gate)
+        run: |
+          if [ -f .eval-baseline/main.json ]; then
+            pnpm eval:diff .eval-baseline/main.json .eval-current/report.json
+          else
+            echo "[delta-gate] no baseline yet — first run, skipping diff"
+            pnpm eval:diff --no-baseline .eval-current/report.json
+          fi
+
+      # Promote current to baseline for next run, but ONLY on a green
+      # push to main. Workflow_dispatch runs (manual / branch) still
+      # diff against main but don't pollute the baseline cache.
+      - name: Promote current to baseline
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          mkdir -p .eval-baseline
+          cp .eval-current/report.json .eval-baseline/main.json
 
   docker:
     runs-on: ubuntu-latest

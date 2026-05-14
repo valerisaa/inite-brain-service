@@ -1,10 +1,51 @@
 import type { EvalReport, AggregateMetric } from '../types';
 
 /**
+ * Stable, machine-readable shape used for baseline-diff. Kept narrow on
+ * purpose — only the fields the delta-gate compares — so adding a new
+ * AggregateMetric field doesn't churn baselines unnecessarily. Schema
+ * version lets the diff script reject unknown shapes loudly instead of
+ * silently treating them as a regression.
+ */
+export interface SerializedReport {
+  schemaVersion: 1;
+  generatedAt: string;
+  perVertical: Array<{
+    vertical: string;
+    scenarios: number;
+    metrics: Array<{ name: string; value: number | null; threshold?: number }>;
+  }>;
+  overall: Array<{ name: string; value: number | null; threshold?: number }>;
+}
+
+/**
  * Renders an EvalReport as a human-readable markdown summary.
  * Pure formatting — no IO, no side-effects.
  */
 export class Reporter {
+  /**
+   * Stable JSON shape for baseline-diff and downstream tooling. The
+   * markdown render() is for humans; this is for machines. Only the
+   * fields the delta-gate compares are emitted.
+   */
+  serialize(report: EvalReport): SerializedReport {
+    const stripMetric = (m: AggregateMetric) => ({
+      name: m.name,
+      value: m.value,
+      ...(m.threshold !== undefined ? { threshold: m.threshold } : {}),
+    });
+    return {
+      schemaVersion: 1,
+      generatedAt: new Date().toISOString(),
+      perVertical: report.perVertical.map((v) => ({
+        vertical: v.vertical,
+        scenarios: v.scenarios,
+        metrics: v.metrics.map(stripMetric),
+      })),
+      overall: report.overall.map(stripMetric),
+    };
+  }
+
   render(report: EvalReport): string {
     const lines: string[] = [];
     lines.push('## Brain Quality Eval', '');

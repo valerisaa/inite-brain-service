@@ -64,7 +64,19 @@ export async function spawnService(opts: SpawnOptions = {}): Promise<SpawnedServ
     OPENAI_API_KEY: loadOpenAiKey(),
     OPENAI_EMBEDDING_MODEL: 'text-embedding-3-small',
     OPENAI_EMBEDDING_DIMENSIONS: '1536',
-    OPENAI_CHAT_MODEL: 'gpt-4o-mini',
+    // Pinned snapshot — alias `gpt-4o-mini` silently re-targets when
+    // OpenAI rolls a new default, which moves eval baselines and breaks
+    // delta-gate diffs. Extractor still uses temperature=0.1 (intentional
+    // noise for entity recall); everything else is temperature=0.
+    OPENAI_CHAT_MODEL: 'gpt-4o-mini-2024-07-18',
+    // Disable throttling for the spawned test process. Quality-eval
+    // bursts hundreds of ingest+search calls in seconds; the
+    // production default (120/min) shields a real tenant but kills
+    // the eval harness, producing a self-inflicted false negative.
+    // Specs that explicitly want to test throttler behaviour can
+    // override via SpawnOptions.env.
+    THROTTLE_LIMIT: '100000',
+    THROTTLE_TTL_MS: '60000',
     BRAIN_API_KEYS: JSON.stringify(allKeys),
     FORGET_HMAC_KEY: 'test-hmac-key-must-be-at-least-32-chars',
     // Spec-supplied overrides land last so a spec can override anything

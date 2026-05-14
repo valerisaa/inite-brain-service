@@ -19,6 +19,7 @@
     "test:e2e": "jest --config ./test/jest-e2e.json",
     "test:e2e:real": "pnpm build && jest --config ./test/jest-e2e-real.json --runInBand --testPathPattern=brain.real",
     "test:eval": "pnpm build && jest --config ./test/jest-e2e-real.json --runInBand --testPathPattern=quality",
+    "eval:diff": "ts-node -r tsconfig-paths/register scripts/eval-baseline-diff.ts",
     "test:eval:fat": "pnpm build && FAT_TENANT_RUN=1 jest --config ./test/jest-e2e-real.json --runInBand --testPathPattern=fat-tenant",
     "test:eval:directory": "pnpm build && DIRECTORY_RUN=1 jest --config ./test/jest-e2e-real.json --runInBand --testPathPattern=directory",
     "test:eval:json": "pnpm build && jest --config ./test/jest-e2e-real.json --runInBand --testPathPattern=json-directory",
