@@ -217,10 +217,7 @@ describe('ApiKeyGuard — production with JWKS rejects static keys', () => {
         {
           keyHash:
             'sha256:' +
-            require('node:crypto')
-              .createHash('sha256')
-              .update('prod-static-key')
-              .digest('hex'),
+            createHash('sha256').update('prod-static-key').digest('hex'),
           companyId: 'co_prod',
           scopes: ['brain:read'],
         },
