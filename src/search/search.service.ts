@@ -243,19 +243,35 @@ export class SearchService {
       // [0, 1); we multiply by decay × confidence × predicate-boost
       // as the final ranking signal.
       const now = Date.now();
-      // PREDICATE_BOOST_ALPHA caps the boost at 1 + alpha*1.0 = 1.5x
-      // for a perfect predicate match, 1.0x for a missed class.
-      // Soft enough that a strong embedding hit on the wrong
-      // predicate can still beat a weak hit on the right one.
-      const PREDICATE_BOOST_ALPHA = 0.5;
+      // Per-predicate boost α. Most predicates use the soft default
+      // (0.5 → max 1.5x boost) — a strong embedding hit on the wrong
+      // class can still beat a weak hit on the right one. PII-class
+      // discriminators (dob, email, phone) use a stronger α (1.5)
+      // because they're high-cardinality identifiers — when the router
+      // says "this is a dob lookup", the dob fact MUST surface above
+      // the name fact for the same entity. Address uses 0.8 — between
+      // the two — because address-vs-name disambiguation is real but
+      // less stark than dob-vs-name.
+      // Empirical anchor: per-predicate eval reported dob match-rate
+      // 0.30 → 0.60 after the prompt patch, still 40% miss; raising
+      // α here is the second half of the fix.
+      const PREDICATE_BOOST_ALPHA: Record<string, number> = {
+        dob: 1.5,
+        email: 1.5,
+        phone: 1.5,
+        address: 0.8,
+      };
+      const PREDICATE_BOOST_ALPHA_DEFAULT = 0.5;
       const scored = filtered.map((row) => {
         const policy = policyFor(row.predicate);
         const ageDays = (now - new Date(row.recordedAt).getTime()) / 86_400_000;
         const decay = policy.decayHalfLifeDays === null
           ? 1
           : Math.exp((-Math.LN2 * ageDays) / policy.decayHalfLifeDays);
+        const alpha =
+          PREDICATE_BOOST_ALPHA[row.predicate] ?? PREDICATE_BOOST_ALPHA_DEFAULT;
         const predBoost = predicateDist
-          ? 1 + PREDICATE_BOOST_ALPHA * (predicateDist.weights[row.predicate] ?? 0)
+          ? 1 + alpha * (predicateDist.weights[row.predicate] ?? 0)
           : 1;
         const finalScore = row.fusedScore * decay * row.confidence * predBoost;
         return { row, score: finalScore };
