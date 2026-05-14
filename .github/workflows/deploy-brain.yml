@@ -207,23 +207,47 @@ jobs:
             exit 1
           fi
 
-      - name: Health probe
+      - name: Internal health probe
         if: github.event.inputs.action != 'logs'
         run: |
           cd /opt/projects/${{ env.PROJECT_NAME }}
-          # External probe through Traefik (cert may take ~30s on first deploy).
+          # Internal probe via docker exec — bypasses DNS / Traefik /
+          # cert provisioning. This is the gate signal: did brain itself
+          # boot and respond. External reachability checked separately
+          # (warning-only) so a missing DNS record or slow Let's Encrypt
+          # cert doesn't fail an otherwise-healthy deploy.
+          for i in $(seq 1 18); do
+            if docker-compose exec -T ${{ env.PROJECT_NAME }} wget -qO- http://localhost:${{ env.PORT }}/health > /dev/null 2>&1; then
+              echo "[ok] container responds on http://localhost:${{ env.PORT }}/health"
+              docker-compose exec -T ${{ env.PROJECT_NAME }} wget -qO- http://localhost:${{ env.PORT }}/health | head -c 500
+              echo ""
+              exit 0
+            fi
+            echo "[info] waiting for brain to come up... ($i/18)"
+            sleep 5
+          done
+          echo "[err] internal health never responded"
+          docker-compose logs --tail=120 ${{ env.PROJECT_NAME }}
+          exit 1
+
+      - name: External health probe (warning-only)
+        if: github.event.inputs.action != 'logs'
+        continue-on-error: true
+        run: |
+          # Best-effort — DNS may not be wired yet, Let's Encrypt cert
+          # provisioning can take 30-90s on first deploy. Failure here
+          # surfaces as a workflow warning, not a deploy block.
           for i in $(seq 1 12); do
             if curl -fs https://${{ env.DOMAIN }}/health > /dev/null 2>&1; then
               echo "[ok] https://${{ env.DOMAIN }}/health responds"
               curl -s https://${{ env.DOMAIN }}/health | head -c 500
+              echo ""
               exit 0
             fi
-            echo "[info] waiting for cert / health... ($i/12)"
+            echo "[info] external probe retry ($i/12)..."
             sleep 10
           done
-          echo "[err] health probe never responded"
-          docker-compose logs --tail=80 ${{ env.PROJECT_NAME }}
-          exit 1
+          echo "[warn] https://${{ env.DOMAIN }}/health never responded — check DNS A-record + Traefik cert in droplet logs"
 
       - name: Cleanup
         if: always() && github.event.inputs.action != 'logs'
