@@ -31,13 +31,22 @@ export class ApiKeyGuard implements CanActivate {
     config: ConfigService,
   ) {
     const env = config.get<string>('NODE_ENV', 'development');
-    // In production with JWKS configured, static keys are off — operators
-    // must issue tokens through the auth-service. Everywhere else (dev,
-    // test, JWKS not configured) static keys are accepted as a fallback.
-    this.staticAllowed = !(env === 'production' && this.jwks.enabled());
+    const explicitOverride =
+      config.get<string>('BRAIN_STATIC_KEYS_ENABLED', '0') === '1';
+    // In production with JWKS configured, static keys are off by default —
+    // operators must issue tokens through the auth-service. Set
+    // BRAIN_STATIC_KEYS_ENABLED=1 to opt back in for narrowly-scoped
+    // service identities (e.g. brain-landing's admin BFF) until a real
+    // client_credentials flow is wired into auth.inite.ai.
+    const prodBlocked = env === 'production' && this.jwks.enabled();
+    this.staticAllowed = !prodBlocked || explicitOverride;
     if (!this.staticAllowed) {
       this.logger.log(
         'Static BRAIN_API_KEYS disabled in production with JWKS enabled — JWT only',
+      );
+    } else if (prodBlocked) {
+      this.logger.warn(
+        'BRAIN_STATIC_KEYS_ENABLED=1 — static keys accepted alongside JWT in production',
       );
     }
   }

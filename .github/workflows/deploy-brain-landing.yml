@@ -135,6 +135,18 @@ jobs:
                 - PORT=${{ env.PORT }}
                 - HOSTNAME=0.0.0.0
                 - NEXT_PUBLIC_BRAIN_API_URL=https://${{ env.DOMAIN }}
+                # Server-to-server brain calls bypass Traefik — go straight to
+                # the backend container on the shared docker network so the
+                # admin BFF doesn't loop through HTTPS for itself.
+                - BRAIN_API_URL=http://inite-brain-service:3000
+                - BRAIN_SERVICE_KEY=${{ secrets.BRAIN_SERVICE_KEY }}
+                # OAuth client for the admin user-side auth flow.
+                # auth.inite.ai must be told about this client + the
+                # /api/auth/callback redirect URI.
+                - AUTH_SERVICE_URL=https://auth.inite.ai
+                - NEXT_PUBLIC_AUTH_SERVICE_URL=https://auth.inite.ai
+                - OAUTH_CLIENT_ID=brain-landing
+                - NEXT_PUBLIC_OAUTH_CLIENT_ID=brain-landing
               labels:
                 - "traefik.enable=true"
                 - "traefik.docker.network=traefik-global"
