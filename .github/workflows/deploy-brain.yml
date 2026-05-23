@@ -145,16 +145,14 @@ jobs:
                 - OPENAI_TIMEOUT_MS=30000
                 - OPENAI_MAX_RETRIES=3
                 - OPENAI_CONCURRENCY=8
-                # Auth — JWKS via auth.inite.ai. JWT is the primary path;
-                # static BRAIN_API_KEYS are opted back in via
-                # BRAIN_STATIC_KEYS_ENABLED=1 so brain-landing's admin BFF
-                # can talk to brain as a service identity until a real
-                # client_credentials flow exists in auth.inite.ai.
+                # Auth — JWKS via auth.inite.ai. NODE_ENV=production +
+                # JWKS enabled ⇒ static BRAIN_API_KEYS is REJECTED, JWT only.
+                # The brain-landing admin BFF gets its JWT through the
+                # auth-service client_credentials grant — see
+                # deploy-brain-landing.yml for OAUTH_CLIENT_ID/SECRET wiring.
                 - AUTH_SERVICE_URL=https://auth.inite.ai
                 - AUTH_SERVICE_JWKS_URL=https://auth.inite.ai/.well-known/jwks.json
                 - AUTH_SERVICE_AUDIENCE=brain
-                - BRAIN_API_KEYS=${{ secrets.BRAIN_API_KEYS }}
-                - BRAIN_STATIC_KEYS_ENABLED=1
                 # GDPR forget HMAC — opaque tombstone marker.
                 - FORGET_HMAC_KEY=${{ secrets.BRAIN_FORGET_HMAC_KEY }}
                 # Search retrieval features — eval-validated ON config.

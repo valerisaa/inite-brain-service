@@ -139,14 +139,18 @@ jobs:
                 # the backend container on the shared docker network so the
                 # admin BFF doesn't loop through HTTPS for itself.
                 - BRAIN_API_URL=http://inite-brain-service:3000
-                - BRAIN_SERVICE_KEY=${{ secrets.BRAIN_SERVICE_KEY }}
-                # OAuth client for the admin user-side auth flow.
-                # auth.inite.ai must be told about this client + the
-                # /api/auth/callback redirect URI.
+                # OAuth client for both the user-side login flow AND the
+                # server-side client_credentials grant used by the admin
+                # BFF to mint a brain:admin JWT. auth.inite.ai must have
+                # client `brain-landing` registered with redirect URI
+                # https://brain.inite.ai/api/auth/callback,
+                # allowedScopes including brain:admin, and
+                # allowedAudiences including 'brain'.
                 - AUTH_SERVICE_URL=https://auth.inite.ai
                 - NEXT_PUBLIC_AUTH_SERVICE_URL=https://auth.inite.ai
                 - OAUTH_CLIENT_ID=brain-landing
                 - NEXT_PUBLIC_OAUTH_CLIENT_ID=brain-landing
+                - OAUTH_CLIENT_SECRET=${{ secrets.OAUTH_CLIENT_SECRET }}
               labels:
                 - "traefik.enable=true"
                 - "traefik.docker.network=traefik-global"

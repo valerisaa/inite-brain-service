@@ -5,24 +5,20 @@ import { jwtVerify, createRemoteJWKSet } from 'jose'
  * Edge guard for /(en|ru)/admin/**.
  *
  * Strategy: lightweight JWT verify on the edge (signature + audience).
- * If the token is missing or `isAdmin` is false, redirect to the
- * auth-service login. Server-side API routes (under /api/admin/proxy)
- * re-verify via `server-auth.ts` for defense in depth.
+ * If the cookie is missing or `isAdmin` is false, redirect into the
+ * OAuth init flow (`/api/auth/login?return_url=...`). The init endpoint
+ * generates PKCE and bounces the user to auth.inite.ai.
  *
- * ADMIN_DEV_BYPASS=1 lets local devs skip the JWT step entirely. The
- * server-side proxy honors the same flag.
+ * ADMIN_DEV_BYPASS=1 short-circuits the JWT check entirely. Never
+ * enable in production.
  */
 
-const LANG_RE = /^\/(en|ru)(\/|$)/
 const ADMIN_PATH_RE = /^\/(en|ru)?\/?admin(\/|$)/
 
 const AUTH_DOMAIN =
   process.env.AUTH_SERVICE_URL ||
   process.env.NEXT_PUBLIC_AUTH_SERVICE_URL ||
   'https://auth.inite.ai'
-
-const AUTH_BROWSER_URL =
-  process.env.NEXT_PUBLIC_AUTH_SERVICE_URL || 'https://auth.inite.ai'
 
 const EXPECTED_AUDIENCE =
   process.env.OAUTH_CLIENT_ID ||
@@ -32,9 +28,9 @@ const EXPECTED_AUDIENCE =
 const JWKS = createRemoteJWKSet(new URL('/.well-known/jwks.json', AUTH_DOMAIN))
 
 function loginRedirect(req: NextRequest): NextResponse {
-  const continueTo = `${req.nextUrl.origin}${req.nextUrl.pathname}${req.nextUrl.search}`
-  const url = new URL('/login', AUTH_BROWSER_URL)
-  url.searchParams.set('continue', continueTo)
+  const returnUrl = `${req.nextUrl.pathname}${req.nextUrl.search}`
+  const url = new URL('/api/auth/login', req.url)
+  url.searchParams.set('return_url', returnUrl)
   return NextResponse.redirect(url)
 }
 
@@ -56,13 +52,10 @@ async function isAdminToken(token: string): Promise<boolean> {
 export async function middleware(req: NextRequest) {
   const pathname = req.nextUrl.pathname
 
-  // Only the admin tree needs gating. Everything else (marketing, docs)
-  // is public.
   if (!ADMIN_PATH_RE.test(pathname)) {
     return NextResponse.next()
   }
 
-  // Dev bypass — local kicks straight in.
   if (process.env.ADMIN_DEV_BYPASS === '1') {
     return NextResponse.next()
   }
@@ -80,8 +73,6 @@ export async function middleware(req: NextRequest) {
   return NextResponse.next()
 }
 
-// Match everything that touches the admin tree, plus the unprefixed
-// /admin -> /en/admin redirect handled by Next routing itself.
 export const config = {
   matcher: ['/admin/:path*', '/en/admin/:path*', '/ru/admin/:path*'],
 }

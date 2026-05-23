@@ -7,6 +7,13 @@ export interface AdminSession {
   isAdmin: true
 }
 
+// Sentinel value used by dev-bypass + reused by /api/auth/me.
+const DEV_BYPASS_SESSION: AdminSession = {
+  userId: 'dev-bypass',
+  email: 'dev@local',
+  isAdmin: true,
+}
+
 export async function extractAccessToken(
   request: NextRequest,
 ): Promise<string | null> {
@@ -22,7 +29,7 @@ export async function extractAccessToken(
  */
 function devBypass(): AdminSession | null {
   if (process.env.ADMIN_DEV_BYPASS !== '1') return null
-  return { userId: 'dev-bypass', email: 'dev@local', isAdmin: true }
+  return DEV_BYPASS_SESSION
 }
 
 export async function getAdminSession(
