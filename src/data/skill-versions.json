@@ -1,0 +1,9 @@
+{
+  "bundleVersion": "0.1.0",
+  "skills": [
+    "brain-bitemporal",
+    "brain-mcp-setup",
+    "brain-recall",
+    "brain-search"
+  ]
+}
