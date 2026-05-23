@@ -220,6 +220,7 @@ export class EntitiesService {
     entityIdRaw: string,
     kind: string | undefined,
     scopes: BrainScope[] = [],
+    asOf?: string,
   ): Promise<{ entityId: string; edges: any[] }> {
     const ref = this.normalizeEntityId(entityIdRaw);
 
@@ -236,21 +237,28 @@ export class EntitiesService {
       // 2.0.x — the multi-statement chain confused the result mapper.
       // The inline form (no LET) executes cleanly.
       const kindParam = kind ? ' AND kind = $kind' : '';
+      // Bitemporal cutoff on the transaction-time axis. Without asOf,
+      // active = invalidatedAt IS NONE (i.e. believed now). With asOf,
+      // active = createdAt <= asOf AND (invalidatedAt IS NONE OR
+      // invalidatedAt > asOf) — "what brain knew on that moment".
+      const asOfParam = asOf
+        ? ' AND createdAt <= type::datetime($asOf) AND (invalidatedAt IS NONE OR invalidatedAt > type::datetime($asOf))'
+        : ' AND invalidatedAt IS NONE';
       const outSql = `
         SELECT id, kind, weight, source, createdAt, invalidatedAt, in, out,
                out.{id, type, canonicalName} AS toEntity
         FROM type::thing('knowledge_entity', $rid)->knowledge_edge
-        WHERE invalidatedAt IS NONE${kindParam}
+        WHERE 1=1${asOfParam}${kindParam}
       `;
       const inSql = `
         SELECT id, kind, weight, source, createdAt, invalidatedAt, in, out,
                in.{id, type, canonicalName} AS fromEntity
         FROM type::thing('knowledge_entity', $rid)<-knowledge_edge
-        WHERE invalidatedAt IS NONE${kindParam}
+        WHERE 1=1${asOfParam}${kindParam}
       `;
       const [outRowsResult, inRowsResult] = await Promise.all([
-        db.query<any[][]>(outSql, { rid: ref.id, kind }),
-        db.query<any[][]>(inSql, { rid: ref.id, kind }),
+        db.query<any[][]>(outSql, { rid: ref.id, kind, asOf }),
+        db.query<any[][]>(inSql, { rid: ref.id, kind, asOf }),
       ]);
       const outRows = ((outRowsResult[0] as any[]) ?? []) as any[];
       const inRows = ((inRowsResult[0] as any[]) ?? []) as any[];

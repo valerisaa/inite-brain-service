@@ -19,6 +19,7 @@ import { McpModule } from './mcp/mcp.module';
 import { CompactionModule } from './compaction/compaction.module';
 import { DreamsModule } from './dreams/dreams.module';
 import { MetricsModule } from './metrics/metrics.module';
+import { AdminModule } from './admin/admin.module';
 
 @Module({
   imports: [
@@ -52,6 +53,7 @@ import { MetricsModule } from './metrics/metrics.module';
     CompactionModule,
     DreamsModule,
     MetricsModule,
+    AdminModule,
   ],
   controllers: [HealthController],
   providers: [

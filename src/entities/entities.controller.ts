@@ -56,12 +56,14 @@ export class EntitiesController {
     @Req() req: AuthenticatedRequest,
     @Param('id') id: string,
     @Query('kind') kind?: string,
+    @Query('asOf') asOf?: string,
   ) {
     return this.entities.getConnections(
       req.brainAuth.companyId,
       id,
       kind,
       req.brainAuth.scopes,
+      asOf,
     );
   }
 
