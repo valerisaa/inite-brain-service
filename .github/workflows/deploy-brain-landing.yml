@@ -1,0 +1,219 @@
+name: Deploy brain.inite.ai landing
+
+# Builds + deploys the marketing/docs landing that serves /, /{en,ru}*,
+# /skills.tar.gz, /install.sh on the SAME host as the backend
+# (brain.inite.ai). Backend's Traefik router is restricted to
+# /v1, /mcp, /health, /metrics, /openapi.json — see deploy-brain.yml.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'brain-landing/**'
+      - 'skills/**'
+      - 'scripts/build-skill-versions.ts'
+      - 'scripts/bump-skill-versions.ts'
+      - 'scripts/package-skills.ts'
+      - '.github/workflows/deploy-brain-landing.yml'
+  workflow_dispatch:
+    inputs:
+      action:
+        description: 'deploy | restart | logs'
+        required: false
+        default: 'deploy'
+
+concurrency:
+  group: deploy-brain-landing-${{ github.event_name }}
+  cancel-in-progress: true
+
+env:
+  PROJECT_NAME: inite-brain-landing
+  DOMAIN: brain.inite.ai
+  PORT: 3030
+
+jobs:
+  build-and-push:
+    if: github.event_name == 'push' || (github.event.inputs.action != 'restart' && github.event.inputs.action != 'logs')
+    runs-on: [self-hosted, sfo]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # Pack skills.tar.gz + install.sh into brain-landing/public/ before
+      # the docker build context is read. Single source of truth for both
+      # is skills/ at the repo root.
+      - name: Set up Node (for skills:pack)
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v3
+        with:
+          version: 10
+          run_install: false
+
+      - name: Pack skills bundle into landing/public
+        run: |
+          pnpm install --frozen-lockfile --ignore-scripts || pnpm install --ignore-scripts
+          pnpm skills:pack
+          ls -l brain-landing/public/skills.tar.gz brain-landing/public/install.sh
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: brain-landing
+          push: true
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/inite-brain-landing:latest
+            ${{ secrets.DOCKERHUB_USERNAME }}/inite-brain-landing:${{ github.sha }}
+          cache-from: type=registry,ref=${{ secrets.DOCKERHUB_USERNAME }}/inite-brain-landing:buildcache
+          cache-to: type=registry,ref=${{ secrets.DOCKERHUB_USERNAME }}/inite-brain-landing:buildcache,mode=max
+          platforms: linux/amd64
+          build-args: |
+            NEXT_PUBLIC_BRAIN_API_URL=https://${{ env.DOMAIN }}
+
+      - name: Build info
+        run: |
+          echo "[ok] Image pushed: ${{ secrets.DOCKERHUB_USERNAME }}/inite-brain-landing:${{ github.sha }}"
+
+  deploy:
+    needs: build-and-push
+    if: |
+      always() && (
+        (github.event_name == 'push' && needs.build-and-push.result == 'success') ||
+        (github.event_name == 'workflow_dispatch' && (needs.build-and-push.result == 'success' || github.event.inputs.action == 'restart' || github.event.inputs.action == 'logs'))
+      )
+    runs-on: [self-hosted, sfo]
+
+    steps:
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        if: github.event.inputs.action != 'logs'
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Logs
+        if: github.event.inputs.action == 'logs'
+        run: |
+          cd /opt/projects/${{ env.PROJECT_NAME }}
+          docker-compose logs --tail=200 ${{ env.PROJECT_NAME }}
+
+      - name: Deploy to server
+        if: github.event.inputs.action != 'logs'
+        run: |
+          mkdir -p /opt/projects/${{ env.PROJECT_NAME }}
+          cd /opt/projects/${{ env.PROJECT_NAME }}
+
+          # Landing handles Host(brain.inite.ai) as a catch-all. Backend
+          # owns the explicit /v1, /mcp, /health, /metrics, /openapi.json
+          # prefixes via priority=200 + PathPrefix rules. Traefik picks the
+          # longest matching rule, so backend wins on its paths and the
+          # landing serves everything else (/, /{en,ru}/*, /skills.tar.gz,
+          # /install.sh, /_next/*).
+          tee docker-compose.yml > /dev/null << EOF
+          services:
+            ${{ env.PROJECT_NAME }}:
+              image: ${{ secrets.DOCKERHUB_USERNAME }}/inite-brain-landing:latest
+              container_name: ${{ env.PROJECT_NAME }}
+              restart: unless-stopped
+              expose:
+                - "${{ env.PORT }}"
+              environment:
+                - NODE_ENV=production
+                - PORT=${{ env.PORT }}
+                - HOSTNAME=0.0.0.0
+                - NEXT_PUBLIC_BRAIN_API_URL=https://${{ env.DOMAIN }}
+              labels:
+                - "traefik.enable=true"
+                - "traefik.docker.network=traefik-global"
+                # Host-only catch-all — priority=100 (lower than backend's
+                # PathPrefix routers at 200).
+                - "traefik.http.routers.${{ env.PROJECT_NAME }}.rule=Host(\`${{ env.DOMAIN }}\`)"
+                - "traefik.http.routers.${{ env.PROJECT_NAME }}.priority=100"
+                - "traefik.http.routers.${{ env.PROJECT_NAME }}.entrypoints=websecure"
+                - "traefik.http.routers.${{ env.PROJECT_NAME }}.tls=true"
+                - "traefik.http.routers.${{ env.PROJECT_NAME }}.tls.certresolver=letsencrypt"
+                - "traefik.http.services.${{ env.PROJECT_NAME }}.loadbalancer.server.port=${{ env.PORT }}"
+              healthcheck:
+                test: ["CMD", "wget", "-qO-", "http://localhost:${{ env.PORT }}/en"]
+                interval: 30s
+                timeout: 5s
+                retries: 5
+                start_period: 30s
+              networks:
+                - traefik-global
+                - default
+
+          networks:
+            traefik-global:
+              external: true
+          EOF
+
+          if [ "${{ github.event.inputs.action }}" = "restart" ]; then
+            echo "[deploy] restart only"
+            docker-compose restart ${{ env.PROJECT_NAME }}
+          else
+            echo "[deploy] pulling image..."
+            docker-compose pull ${{ env.PROJECT_NAME }}
+            echo "[deploy] up -d"
+            docker-compose up -d --remove-orphans
+          fi
+
+          sleep 20
+
+          if docker-compose ps | grep -q "Up"; then
+            echo "[ok] ${{ env.PROJECT_NAME }} container is up"
+          else
+            echo "[err] container failed to start"
+            docker-compose logs --tail=100 ${{ env.PROJECT_NAME }}
+            exit 1
+          fi
+
+      - name: Internal health probe
+        if: github.event.inputs.action != 'logs'
+        run: |
+          cd /opt/projects/${{ env.PROJECT_NAME }}
+          for i in $(seq 1 18); do
+            if docker-compose exec -T ${{ env.PROJECT_NAME }} wget -qO- http://localhost:${{ env.PORT }}/en > /dev/null 2>&1; then
+              echo "[ok] container responds on /en"
+              exit 0
+            fi
+            echo "[info] waiting for landing... ($i/18)"
+            sleep 5
+          done
+          echo "[err] landing never responded"
+          docker-compose logs --tail=120 ${{ env.PROJECT_NAME }}
+          exit 1
+
+      - name: External health probe (warning-only)
+        if: github.event.inputs.action != 'logs'
+        continue-on-error: true
+        run: |
+          for i in $(seq 1 12); do
+            if curl -fs "https://${{ env.DOMAIN }}/en" > /dev/null 2>&1; then
+              echo "[ok] https://${{ env.DOMAIN }}/en responds"
+              echo "[ok] /skills.tar.gz: $(curl -fsI https://${{ env.DOMAIN }}/skills.tar.gz | head -1)"
+              echo "[ok] /install.sh:    $(curl -fsI https://${{ env.DOMAIN }}/install.sh | head -1)"
+              echo "[ok] /v1/health:     $(curl -fsI https://${{ env.DOMAIN }}/health | head -1)"
+              exit 0
+            fi
+            echo "[info] external probe retry ($i/12)..."
+            sleep 10
+          done
+          echo "[warn] https://${{ env.DOMAIN }}/en never responded — check DNS + Traefik routing"
+
+      - name: Cleanup
+        if: always() && github.event.inputs.action != 'logs'
+        run: docker system prune -f

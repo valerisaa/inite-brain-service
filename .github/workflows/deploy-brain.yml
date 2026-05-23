@@ -173,15 +173,22 @@ jobs:
                 - SEARCH_STAGE_BUDGET_CROSS_ENCODER_MS=2000
                 - SEARCH_STAGE_BUDGET_BACKFILL_MS=2000
               labels:
+                # ── Backend routes only — landing handles the rest of brain.inite.ai.
+                # Backend owns /v1/*, /mcp/*, /health, /metrics, /openapi.json.
+                # Traefik sorts by rule length so this PathPrefix-restricted
+                # router naturally outranks the landing's Host-only catch-all.
                 - "traefik.enable=true"
                 - "traefik.docker.network=traefik-global"
-                - "traefik.http.routers.${{ env.PROJECT_NAME }}.rule=Host(\`${{ env.DOMAIN }}\`)"
+                - "traefik.http.routers.${{ env.PROJECT_NAME }}.rule=Host(\`${{ env.DOMAIN }}\`) && (PathPrefix(\`/v1\`) || PathPrefix(\`/mcp\`) || PathPrefix(\`/health\`) || PathPrefix(\`/metrics\`) || Path(\`/openapi.json\`))"
+                - "traefik.http.routers.${{ env.PROJECT_NAME }}.priority=200"
                 - "traefik.http.routers.${{ env.PROJECT_NAME }}.entrypoints=websecure"
                 - "traefik.http.routers.${{ env.PROJECT_NAME }}.tls=true"
                 - "traefik.http.routers.${{ env.PROJECT_NAME }}.tls.certresolver=letsencrypt"
                 - "traefik.http.services.${{ env.PROJECT_NAME }}.loadbalancer.server.port=${{ env.PORT }}"
                 - "traefik.http.services.${{ env.PROJECT_NAME }}.loadbalancer.responseForwarding.flushInterval=-1"
-                - "traefik.http.routers.${{ env.PROJECT_NAME }}-http.rule=Host(\`${{ env.DOMAIN }}\`)"
+                # http→https redirect for the same backend paths (landing has its own).
+                - "traefik.http.routers.${{ env.PROJECT_NAME }}-http.rule=Host(\`${{ env.DOMAIN }}\`) && (PathPrefix(\`/v1\`) || PathPrefix(\`/mcp\`) || PathPrefix(\`/health\`) || PathPrefix(\`/metrics\`) || Path(\`/openapi.json\`))"
+                - "traefik.http.routers.${{ env.PROJECT_NAME }}-http.priority=200"
                 - "traefik.http.routers.${{ env.PROJECT_NAME }}-http.entrypoints=web"
                 - "traefik.http.routers.${{ env.PROJECT_NAME }}-http.middlewares=redirect-to-https"
                 - "traefik.http.middlewares.redirect-to-https.redirectscheme.scheme=https"
