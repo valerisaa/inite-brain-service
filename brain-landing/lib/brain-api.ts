@@ -97,6 +97,8 @@ export interface BrainFetchOptions {
   body?: unknown
   query?: Record<string, string | number | undefined>
   signal?: AbortSignal
+  /** Extra headers merged on top of Authorization/Content-Type. */
+  headers?: Record<string, string>
 }
 
 export interface BrainResponse<T = unknown> {
@@ -139,6 +141,7 @@ export async function brainFetch<T = unknown>(
       headers: {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${token}`,
+        ...(options.headers ?? {}),
       },
       body: options.body ? JSON.stringify(options.body) : undefined,
       signal: options.signal,

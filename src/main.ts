@@ -12,6 +12,7 @@ import helmet from 'helmet';
 import { AppModule } from './app.module';
 import { validateEnv } from './common/env-validation';
 import { requestLogger } from './common/request-logger';
+import { debugTraceMiddleware } from './common/debug-trace';
 
 async function bootstrap() {
   // Fail fast on missing/invalid env before NestJS or Surreal even start.
@@ -27,6 +28,7 @@ async function bootstrap() {
     hsts: { maxAge: 31536000, includeSubDomains: true, preload: true },
   }));
 
+  app.use(debugTraceMiddleware());
   app.use(requestLogger());
 
   app.useGlobalPipes(

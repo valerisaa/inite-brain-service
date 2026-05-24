@@ -10,6 +10,7 @@ import { policyFor } from '../ingest/conflict-resolver';
 import { countJsonTokens } from '../common/token-counter';
 import { MetricsService } from '../metrics/metrics.service';
 import { withSpan } from '../common/tracing';
+import { traceArtifact } from '../common/debug-trace';
 
 export interface SearchHit {
   entityId: string;
@@ -241,6 +242,7 @@ export class SearchService {
       // entity filter, which is the common case for free-text search.
       const baseWhere = this.buildBaseWhere(dto, asOf, includeRetracted, includeContested);
 
+      traceArtifact('search.query', { query: dto.query, mode, candidateK, asOf: dto.asOf });
       const [vectorRows, lexicalRows] = await Promise.all([
         mode === 'lexical'
           ? Promise.resolve([] as FactRow[])
@@ -254,6 +256,16 @@ export class SearchService {
                   baseWhere,
                 );
                 span.setAttribute('candidates', rows.length);
+                traceArtifact(
+                  'search.vector_hits',
+                  rows.slice(0, 20).map((r) => ({
+                    factId: String(r.id),
+                    entityId: String(r.entityId),
+                    predicate: r.predicate,
+                    object: r.object,
+                    simScore: r.simScore,
+                  })),
+                );
                 return rows;
               },
               { 'search.k': candidateK },
@@ -270,6 +282,16 @@ export class SearchService {
                   baseWhere,
                 );
                 span.setAttribute('candidates', rows.length);
+                traceArtifact(
+                  'search.lexical_hits',
+                  rows.slice(0, 20).map((r) => ({
+                    factId: String(r.id),
+                    entityId: String(r.entityId),
+                    predicate: r.predicate,
+                    object: r.object,
+                    bm25Score: r.bm25Score,
+                  })),
+                );
                 return rows;
               },
               { 'search.k': candidateK },
@@ -320,6 +342,7 @@ export class SearchService {
       });
       const predicateDist = routerOut?.predicates ?? null;
       const typeDist = routerOut?.types ?? null;
+      if (routerOut) traceArtifact('search.router_classification', routerOut);
 
       // Decay-weighted final score uses predicate half-life. Vector
       // and lexical fusion give us a normalized retrieval score in

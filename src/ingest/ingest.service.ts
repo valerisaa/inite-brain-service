@@ -21,6 +21,7 @@ import {
   scoreFact,
   SOURCE_TRUST,
 } from './conflict-resolver';
+import { traceSpan, traceArtifact } from '../common/debug-trace';
 
 export type IngestOutcome =
   | 'INSERTED'
@@ -233,59 +234,86 @@ export class IngestService {
 
   // ── ingestMention: free-text → LLM extraction → fact records ─────────
   async ingestMention(companyId: string, dto: IngestMentionDto) {
-    const text = redactPii(dto.text);
+    return traceSpan('ingest.mention', async () => {
+      const text = redactPii(dto.text);
+      traceArtifact('ingest.mention.input', {
+        text,
+        contextRef: dto.contextRef,
+        knownEntities: dto.knownEntities,
+      });
 
-    if (!text.trim()) {
-      return { skipped: true, reason: 'empty', extractedEntityIds: [], extractedFactIds: [] };
-    }
-
-    const extraction = await this.extractor.extract(text);
-    if (extraction.entities.length === 0) {
-      return {
-        skipped: true,
-        reason: 'no_entities',
-        extractedEntityIds: [],
-        extractedFactIds: [],
-      };
-    }
-
-    return this.surreal.withCompany(companyId, async (db) => {
-      const entityIds: string[] = [];
-      const factIds: string[] = [];
-
-      for (let i = 0; i < extraction.entities.length; i++) {
-        const e = extraction.entities[i];
-        const knownHint = dto.knownEntities?.[i];
-        const eid = await this.resolveOrCreateNamedEntity(db, e, knownHint, dto.contextRef);
-        entityIds.push(eid);
+      if (!text.trim()) {
+        return { skipped: true, reason: 'empty', extractedEntityIds: [], extractedFactIds: [] };
       }
 
-      for (const f of extraction.facts) {
-        const eid = entityIds[f.entityIndex];
-        if (!eid) continue;
-        const sourceFromContext = {
-          vertical: dto.contextRef.vertical,
-          eventId: dto.contextRef.eventId,
-          conversationId: dto.contextRef.conversationId,
-          messageId: dto.contextRef.messageId,
+      const extraction = await traceSpan('ingest.nlu.extract', () =>
+        this.extractor.extract(text),
+      );
+      traceArtifact('ingest.nlu.extracted', extraction);
+
+      if (extraction.entities.length === 0) {
+        return {
+          skipped: true,
+          reason: 'no_entities',
+          extractedEntityIds: [],
+          extractedFactIds: [],
         };
-        const result = await this.recordExtractedFact(
-          db,
-          eid,
-          f.predicate,
-          f.object,
-          f.confidence,
-          new Date(dto.emittedAt),
-          sourceFromContext,
-        );
-        if (result.factId) factIds.push(result.factId);
       }
 
-      return {
-        skipped: false,
-        extractedEntityIds: entityIds,
-        extractedFactIds: factIds,
-      };
+      return this.surreal.withCompany(companyId, async (db) => {
+        const entityIds: string[] = [];
+        const factIds: string[] = [];
+
+        for (let i = 0; i < extraction.entities.length; i++) {
+          const e = extraction.entities[i];
+          const knownHint = dto.knownEntities?.[i];
+          const eid = await traceSpan(
+            'ingest.entity.resolve',
+            () =>
+              this.resolveOrCreateNamedEntity(
+                db,
+                e,
+                knownHint,
+                dto.contextRef,
+              ),
+            { name: e.name, type: e.type },
+          );
+          entityIds.push(eid);
+        }
+
+        for (const f of extraction.facts) {
+          const eid = entityIds[f.entityIndex];
+          if (!eid) continue;
+          const sourceFromContext = {
+            vertical: dto.contextRef.vertical,
+            eventId: dto.contextRef.eventId,
+            conversationId: dto.contextRef.conversationId,
+            messageId: dto.contextRef.messageId,
+          };
+          const result = await traceSpan(
+            'ingest.fact.upsert',
+            () =>
+              this.recordExtractedFact(
+                db,
+                eid,
+                f.predicate,
+                f.object,
+                f.confidence,
+                new Date(dto.emittedAt),
+                sourceFromContext,
+              ),
+            { predicate: f.predicate, entityId: eid },
+          );
+          if (result.factId) factIds.push(result.factId);
+        }
+
+        traceArtifact('ingest.mention.result', { entityIds, factIds });
+        return {
+          skipped: false,
+          extractedEntityIds: entityIds,
+          extractedFactIds: factIds,
+        };
+      });
     });
   }
 

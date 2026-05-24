@@ -4,6 +4,7 @@ import OpenAI from 'openai';
 import { SearchService, SearchHit } from '../search/search.service';
 import { Semaphore } from '../common/semaphore';
 import { withSpan } from '../common/tracing';
+import { traceArtifact } from '../common/debug-trace';
 import { MetricsService } from '../metrics/metrics.service';
 import {
   SynthesisGuardrails,
@@ -329,6 +330,11 @@ export class SynthesizeService {
     model: string,
   ): Promise<GeneratorOutput> {
     const user = `Query: ${query}\n\nRetrieved facts:\n${factLines.join('\n')}`;
+    traceArtifact('synthesize.generator_prompt', {
+      system: GENERATOR_SYSTEM,
+      user,
+      model,
+    });
     const res = await this.openai.chat.completions.create({
       model,
       messages: [
@@ -363,6 +369,7 @@ export class SynthesizeService {
     if (!Array.isArray(parsed.citedFactIds)) {
       parsed.citedFactIds = [];
     }
+    traceArtifact('synthesize.generator_output', parsed);
     return parsed;
   }
 
@@ -373,6 +380,11 @@ export class SynthesizeService {
     model: string,
   ): Promise<VerifierOutput> {
     const user = `Query: ${query}\n\nAnswer:\n${answer}\n\nSource facts:\n${factLines.join('\n')}`;
+    traceArtifact('synthesize.verifier_prompt', {
+      system: VERIFIER_SYSTEM,
+      user,
+      model,
+    });
     const res = await this.openai.chat.completions.create({
       model,
       messages: [
@@ -414,6 +426,7 @@ export class SynthesizeService {
     ) {
       throw new Error('verifier returned invalid verdict');
     }
+    traceArtifact('synthesize.verifier_output', parsed);
     return parsed;
   }
 }

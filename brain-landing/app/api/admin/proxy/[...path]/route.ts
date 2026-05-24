@@ -17,11 +17,21 @@ const ALLOWED_PREFIXES = [
   // Admin
   'v1/admin/overview',
   'v1/admin/dreams/run',
-  // Read endpoints the graph explorer relies on
+  'v1/admin/scenarios',
+  'v1/admin/baselines',
+  'v1/admin/traces',
+  'v1/admin/tenants/',
+  // Brain user-facing endpoints used by the Playground tabs
   'v1/search',
+  'v1/synthesize',
   'v1/entities/',
+  'v1/ingest/mention',
+  'v1/ingest/fact',
+  'v1/ingest/link',
+  'v1/facts/',
   // Read-aware ops
   'v1/dreams/run',
+  'v1/search/multi-hop',
   // Health for the overview header
   'health',
 ]
@@ -56,10 +66,18 @@ async function forward(
       ? undefined
       : await request.json().catch(() => undefined)
 
+  // When the caller appends ?debug=1, forward X-Brain-Debug:1 so the
+  // backend writes a per-request span buffer + returns __trace in the
+  // response body. Strip the marker from the upstream query so brain
+  // doesn't see it.
+  const debug = query.debug === '1'
+  if (debug) delete query.debug
+
   const res = await brainFetch(`/${subpath}`, {
     method: request.method as 'GET' | 'POST' | 'PUT' | 'DELETE',
     body,
     query,
+    headers: debug ? { 'X-Brain-Debug': '1' } : undefined,
   })
 
   return NextResponse.json(res.data ?? { error: res.error }, {

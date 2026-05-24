@@ -24,6 +24,11 @@
       "@inite/knowledge": ["../inite-shared/packages/knowledge/src/index.ts"]
     }
   },
-  "include": ["src/**/*"],
-  "exclude": ["node_modules", "dist", "test"]
+  "include": [
+    "src/**/*",
+    "test/eval/scenarios/**/*",
+    "test/eval/fixtures/**/*",
+    "test/eval/types.ts"
+  ],
+  "exclude": ["node_modules", "dist"]
 }

@@ -1,7 +1,11 @@
-import { OverviewGrid } from '../../../../components/admin/OverviewGrid'
+import { redirect } from 'next/navigation'
+import { normalizeLang } from '../../../../lib/i18n'
 
-export const dynamic = 'force-dynamic'
+interface Props {
+  params: Promise<{ lang: string }>
+}
 
-export default function OverviewPage() {
-  return <OverviewGrid />
+export default async function LegacyOverviewRedirect({ params }: Props) {
+  const { lang: raw } = await params
+  redirect(`/${normalizeLang(raw)}/admin/explore/overview`)
 }

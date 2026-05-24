@@ -3,7 +3,13 @@
 import Link from 'next/link'
 import { usePathname, useParams } from 'next/navigation'
 import { ReactNode } from 'react'
-import { Activity, Network } from 'lucide-react'
+import {
+  Activity,
+  FlaskConical,
+  ListChecks,
+  Network,
+  Waypoints,
+} from 'lucide-react'
 import { Header } from '../../../components/Header'
 import { useAuth } from '../../../hooks/useAuth'
 import { normalizeLang } from '../../../lib/i18n'
@@ -13,16 +19,11 @@ interface Props {
 }
 
 const SECTIONS = [
-  {
-    slug: 'graph',
-    title: 'Graph explorer',
-    icon: Network,
-  },
-  {
-    slug: 'overview',
-    title: 'Overview',
-    icon: Activity,
-  },
+  { slug: 'playground', title: 'Playground', icon: FlaskConical },
+  { slug: 'scenarios', title: 'Scenarios', icon: ListChecks },
+  { slug: 'traces', title: 'Traces', icon: Waypoints },
+  { slug: 'explore/graph', title: 'Explore — graph', icon: Network },
+  { slug: 'explore/overview', title: 'Explore — overview', icon: Activity },
 ]
 
 export default function AdminLayout({ children }: Props) {
@@ -31,9 +32,6 @@ export default function AdminLayout({ children }: Props) {
   const pathname = usePathname() ?? ''
   const auth = useAuth()
 
-  // The Edge middleware already enforced JWT + isAdmin. This client
-  // guard is a fallback for dev-bypass mode where we still want to
-  // surface "not signed in" instead of silently rendering.
   if (!auth.loading && !auth.isAdmin) {
     return (
       <div className="min-h-screen bg-[var(--bg)] flex items-center justify-center">
@@ -51,9 +49,10 @@ export default function AdminLayout({ children }: Props) {
     )
   }
 
-  const currentSlug = pathname
-    .replace(/^\/+(en|ru)\/admin\/?/, '')
-    .split('/')[0]
+  const adminPath = pathname.replace(/^\/+(en|ru)\/admin\/?/, '')
+  const currentSlug = adminPath.startsWith('explore/')
+    ? adminPath.split('/').slice(0, 2).join('/')
+    : adminPath.split('/')[0]
 
   return (
     <div className="min-h-screen bg-[var(--bg)]">

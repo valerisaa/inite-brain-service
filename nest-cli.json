@@ -7,11 +7,11 @@
     "assets": [
       {
         "include": "db/schema.surql",
-        "outDir": "dist"
+        "outDir": "dist/src"
       },
       {
         "include": "db/migrations/*.surql",
-        "outDir": "dist"
+        "outDir": "dist/src"
       }
     ]
   }

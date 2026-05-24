@@ -24,6 +24,7 @@ import { OTLPTraceExporter } from '@opentelemetry/exporter-trace-otlp-http';
 import { resourceFromAttributes } from '@opentelemetry/resources';
 import { ATTR_SERVICE_NAME } from '@opentelemetry/semantic-conventions';
 import { getNodeAutoInstrumentations } from '@opentelemetry/auto-instrumentations-node';
+import { traceSpan as debugTraceSpan } from './debug-trace';
 
 const TRACER_NAME = 'inite-brain-service';
 
@@ -84,17 +85,26 @@ export async function withSpan<T>(
     if (attrs) {
       for (const [k, v] of Object.entries(attrs)) span.setAttribute(k, v);
     }
-    try {
-      return await fn(span);
-    } catch (err) {
-      span.setStatus({
-        code: SpanStatusCode.ERROR,
-        message: (err as Error).message,
-      });
-      span.recordException(err as Error);
-      throw err;
-    } finally {
-      span.end();
-    }
+    // Mirror into the per-request debug-trace buffer when an admin caller
+    // attached one via the X-Brain-Debug header. No-op otherwise; this
+    // is the same async-local-storage check as a bare traceSpan call.
+    return debugTraceSpan(
+      name,
+      async () => {
+        try {
+          return await fn(span);
+        } catch (err) {
+          span.setStatus({
+            code: SpanStatusCode.ERROR,
+            message: (err as Error).message,
+          });
+          span.recordException(err as Error);
+          throw err;
+        } finally {
+          span.end();
+        }
+      },
+      attrs,
+    );
   });
 }
