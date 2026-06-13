@@ -78,6 +78,7 @@ interface ChatResp {
     normalizedMessage?: string
     cleanedQuery?: string
     asOf?: string
+    validFrom?: string
     reason?: string
   }
   /** Retrieval strategy brain actually picked. graph = subject resolved by
@@ -430,6 +431,14 @@ function TurnCard({ turn }: { turn: Turn }) {
         {asOf && (
           <span className="text-[10px] font-mono text-[var(--text-faint)]">
             asOf {asOf.slice(0, 16)}
+          </span>
+        )}
+        {turn.chat?.route?.validFrom && (
+          <span
+            className="text-[10px] font-mono text-[var(--accent)]"
+            title="router extracted validFrom from a temporal phrase in the tell — fact lands with this validity start"
+          >
+            validFrom {turn.chat.route.validFrom.slice(0, 16)}
           </span>
         )}
         {turn.chat?.route?.normalizedMessage &&

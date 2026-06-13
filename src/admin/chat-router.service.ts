@@ -31,6 +31,12 @@ export interface ChatRoute {
    *  month", "вчера", "в марте"). When set with intent='ask', the caller
    *  should pass it through to search as asOf. */
   asOf?: string;
+  /** ISO timestamp for when the asserted fact became true. Set when
+   *  intent='tell' and the message carries a temporal anchor that should
+   *  shift validFrom OFF "now" — e.g. "switched to keto last month"
+   *  should land facts with validFrom one month earlier so as-of-now
+   *  search sees keto and as-of-two-months-ago sees vegan. */
+  validFrom?: string;
   /** Free-text rationale the LLM gave — surfaced only for the debug trace. */
   reason?: string;
 }
@@ -82,14 +88,22 @@ Temporal handling:
   timestamp computed relative to "now". Strip the temporal phrase from
   cleanedQuery so retrieval runs on the topical content alone.
 
-When intent="tell", do NOT compute asOf — emittedAt=now is correct.
+  When intent="tell" AND the message carries a temporal anchor indicating WHEN
+  the asserted fact became true ("switched to keto LAST MONTH", "joined in
+  MARCH", "moved YESTERDAY"), return that as validFrom (ISO 8601). This makes
+  bitemporal facts work from chat — without it every chat-ingested fact would
+  land with validFrom=now and an as-of-past search would miss it.
+  When the tell has no temporal anchor, leave validFrom null and the ingest
+  will default to now.
 
 Rules:
   - Always pick one of the two intents.
-  - asOf must be a valid ISO 8601 timestamp or null.
+  - asOf and validFrom must each be a valid ISO 8601 timestamp or null.
   - normalizedMessage falls back to the original message when no canonicalisation
     applies.
   - cleanedQuery is only set for ask intent.
+  - For "tell" intents asOf must always be null. For "ask" intents validFrom
+    must always be null.
 
 Reply with strict JSON.`;
 
@@ -118,6 +132,7 @@ message: ${message}`;
                 normalizedMessage: { type: ['string', 'null'] },
                 cleanedQuery: { type: ['string', 'null'] },
                 asOf: { type: ['string', 'null'] },
+                validFrom: { type: ['string', 'null'] },
                 reason: { type: ['string', 'null'] },
               },
               required: [
@@ -125,6 +140,7 @@ message: ${message}`;
                 'normalizedMessage',
                 'cleanedQuery',
                 'asOf',
+                'validFrom',
                 'reason',
               ],
             },
@@ -140,6 +156,7 @@ message: ${message}`;
         normalizedMessage: string | null;
         cleanedQuery: string | null;
         asOf: string | null;
+        validFrom: string | null;
         reason: string | null;
       };
       const out: ChatRoute = { intent: parsed.intent };
@@ -152,6 +169,9 @@ message: ${message}`;
       }
       if (parsed.cleanedQuery) out.cleanedQuery = parsed.cleanedQuery;
       if (parsed.asOf && isValidIso(parsed.asOf)) out.asOf = parsed.asOf;
+      if (parsed.validFrom && isValidIso(parsed.validFrom)) {
+        out.validFrom = parsed.validFrom;
+      }
       if (parsed.reason) out.reason = parsed.reason;
       traceArtifact('demo.chat.route', out);
       return out;

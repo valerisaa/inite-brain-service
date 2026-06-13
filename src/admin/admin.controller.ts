@@ -337,10 +337,15 @@ export class AdminController {
       });
       const ingestText = route.normalizedMessage ?? body.message;
       if (route.intent === 'tell') {
+        // When the router extracted validFrom ("last month", "in March"),
+        // pass it as emittedAt so brain's mention pipeline lands each fact
+        // with validFrom = that anchor instead of "now". This is what makes
+        // bitemporal demos work end-to-end through chat ingestion.
+        const emittedAt = route.validFrom ?? new Date().toISOString();
         const ingest = await this.ingest.ingestMention(DEMO_LIVE_COMPANY, {
           text: ingestText,
           contextRef: { vertical: 'shop' },
-          emittedAt: new Date().toISOString(),
+          emittedAt,
         } as any);
         // Lazy fast-path identity resolution. Mirrors how a brain SHOULD
         // behave in production: cheap inline dedup runs in the moment so
