@@ -26,7 +26,7 @@ const ISO = (d: string) => new Date(d).toISOString();
  * факт уже отозван" is precisely what asOf=2026-02-01 demonstrates here.
  */
 const bitemporalTariff: Scenario = {
-  id: 'demo.bitemporal-tariff',
+  id: 'demo-bitemporal-tariff',
   vertical: 'shop',
   description:
     'Slide 9 demo. Acme upgrades plan starter → growth on 2026-03-10. As-of February returns the old plan, current query returns the new plan — same entity, two truths frozen in time.',
@@ -105,7 +105,7 @@ const bitemporalTariff: Scenario = {
  * to keep the demo simple), it just stopped influencing answers.
  */
 const retractCorrection: Scenario = {
-  id: 'demo.retract-correction',
+  id: 'demo-retract-correction',
   vertical: 'shop',
   description:
     'Slide 10 demo (RETRACT). Noisy extraction labeled Acme industry=media. Ops corrected to fintech and retracted the bad fact. Default search returns fintech — media stops influencing answers immediately, no waiting for re-ingest.',
@@ -179,7 +179,7 @@ const retractCorrection: Scenario = {
  * MUST NOT degrade another tenant or another customer in the same tenant.
  */
 const forgetGdpr: Scenario = {
-  id: 'demo.forget-gdpr',
+  id: 'demo-forget-gdpr',
   vertical: 'shop',
   description:
     'Slide 10 demo (FORGET). Customer Marie exercises GDPR Article 17. Forget cascade removes her facts; searching for her returns nothing. The neighbouring customer Alex is untouched — the legal delete is per-subject, not per-tenant.',
@@ -268,7 +268,7 @@ const forgetGdpr: Scenario = {
  * is PII; brain knows because every fact carries a scope.
  */
 const piiGatingSupport: Scenario = {
-  id: 'demo.pii-gating',
+  id: 'demo-pii-gating',
   vertical: 'shop',
   description:
     'Slide 6 / 14 demo (SCOPES). Acme has a contact email on file (PII). A non-PII caller searches and gets the entity back, but the email fact never leaves the server. RAG cannot do this — brain can because every fact carries its own access rule.',

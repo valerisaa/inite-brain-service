@@ -5,7 +5,7 @@ import { DemoQueryCard } from './DemoQueryCard'
 import { DemoRunButton } from './DemoRunButton'
 import { useScenarioRun } from './useScenarioRun'
 
-const SCENARIO_ID = 'demo.retract-correction'
+const SCENARIO_ID = 'demo-retract-correction'
 
 export function RetractSlide() {
   const r = useScenarioRun()

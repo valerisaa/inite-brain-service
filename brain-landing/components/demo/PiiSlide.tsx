@@ -5,7 +5,7 @@ import { DemoFrame } from './DemoFrame'
 import { DemoRunButton } from './DemoRunButton'
 import { useScenarioRun } from './useScenarioRun'
 
-const SCENARIO_ID = 'demo.pii-gating'
+const SCENARIO_ID = 'demo-pii-gating'
 
 export function PiiSlide() {
   const r = useScenarioRun()

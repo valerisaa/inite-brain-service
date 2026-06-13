@@ -5,7 +5,7 @@ import { DemoFrame } from './DemoFrame'
 import { DemoRunButton } from './DemoRunButton'
 import { useScenarioRun } from './useScenarioRun'
 
-const SCENARIO_ID = 'demo.forget-gdpr'
+const SCENARIO_ID = 'demo-forget-gdpr'
 
 export function ForgetSlide() {
   const r = useScenarioRun()

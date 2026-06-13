@@ -5,7 +5,7 @@ import { DemoQueryCard } from './DemoQueryCard'
 import { DemoRunButton } from './DemoRunButton'
 import { useScenarioRun } from './useScenarioRun'
 
-const SCENARIO_ID = 'demo.bitemporal-tariff'
+const SCENARIO_ID = 'demo-bitemporal-tariff'
 
 export function BitemporalSlide() {
   const r = useScenarioRun()
