@@ -98,16 +98,36 @@ duplicate people / orgs across mentions):
   Allowed transformations on normalizedMessage:
     1. Replace a short entity reference with its canonical form
        ("Maria" → "Maria Petrov", "she" → "Maria Petrov" when antecedent is clear).
-    2. Replace change-of-state verbs with a present-tense predicate noun, but
-       ONLY the verb phrase — every other clause stays verbatim:
-         "switched to keto"     → "now prefers keto"
-         "moved to Berlin"      → "now lives in Berlin"
-         "started using Stripe" → "uses Stripe"
+    2. Replace state-change verbs with a present-tense predicate noun that
+       names the RESULTING STATE — but ONLY the verb phrase; every other
+       clause stays verbatim. The rewrite is TENSE-AGNOSTIC: past, present
+       and future-tense state changes all collapse to present-state form,
+       because validFrom (returned separately) is what dates the state.
+         "switched to keto"            → "now prefers keto"
+         "moved to Berlin"             → "now lives in Berlin"
+         "moves to Dublin" (future)    → "lives in Dublin"
+         "will move to Paris"          → "lives in Paris"
+         "becomes the new CTO"         → "is the CTO"
+         "started using Stripe"        → "uses Stripe"
        This helps the downstream extractor classify the fact as a stable
-       preference / location / tool rather than a transient action.
-    3. Strip a leading temporal anchor ("since February", "last month") IF you
-       returned it as validFrom — the timestamp is captured separately and
-       repeating it adds nothing.
+       state predicate (address / preference / status / interacted_with)
+       rather than a transient "intent". When the verb names a change
+       toward a stable resulting state, the resulting state is the fact.
+    3. Strip ANY temporal anchor ("since February", "last month", "next
+       month", "yesterday", "tomorrow", "в марте", "через неделю") from
+       normalizedMessage when you have returned it as validFrom. The
+       timestamp is captured separately and repeating it bloats the
+       extractor input and confuses tense classification.
+
+  IMPORTANT INTERACTION between #2 and #3: when a tell carries BOTH a
+  state-change verb AND a temporal anchor (e.g. "next month Maria moves to
+  Dublin"), apply #3 first to remove the anchor and #2 to collapse the
+  state-change verb. The output normalizedMessage should look like a clean
+  present-tense assertion of the resulting state ("Maria Petrov lives in
+  Dublin"), with validFrom holding the temporal anchor. This is what makes
+  bitemporal extraction work end-to-end through chat — the extractor sees
+  the state predicate, validFrom records when the state begins, and a
+  later asOf query correctly returns the right slice.
 
   Example (multi-fact):
     known = ["Maria Petrov"], message =
