@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { ChevronLeft, ChevronRight } from 'lucide-react'
 import { IntroSlide } from '../../../../components/demo/IntroSlide'
+import { LiveIngestSlide } from '../../../../components/demo/LiveIngestSlide'
 import { BitemporalSlide } from '../../../../components/demo/BitemporalSlide'
 import { RetractSlide } from '../../../../components/demo/RetractSlide'
 import { ForgetSlide } from '../../../../components/demo/ForgetSlide'
@@ -11,6 +12,7 @@ import { OutroSlide } from '../../../../components/demo/OutroSlide'
 
 const SLIDES = [
   { id: 'intro', component: <IntroSlide /> },
+  { id: 'live-ingest', component: <LiveIngestSlide /> },
   { id: 'bitemporal', component: <BitemporalSlide /> },
   { id: 'retract', component: <RetractSlide /> },
   { id: 'forget', component: <ForgetSlide /> },

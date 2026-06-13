@@ -22,8 +22,19 @@ import {
   ScenarioRunOutcome,
 } from './scenario-runner.service';
 import { BaselineService } from './baseline.service';
-import { TraceBufferService } from '../common/debug-trace';
+import { runWithDebugTrace, TraceBufferService } from '../common/debug-trace';
 import { SurrealService } from '../db/surreal.service';
+import { IngestService } from '../ingest/ingest.service';
+import { SearchService } from '../search/search.service';
+
+/**
+ * Shared tenant for the live demo slide. Single shared key so any admin
+ * walking up to the deck sees the same accumulated state — the demo is
+ * meant to be a sandbox an operator can wipe at will via the reset
+ * endpoint. Per-user demo tenants would require a session store; not
+ * worth it for a stage demo.
+ */
+const DEMO_LIVE_COMPANY = 'demo_live';
 
 @Controller('v1/admin')
 @UseGuards(ApiKeyGuard)
@@ -35,6 +46,8 @@ export class AdminController {
     private readonly baselines: BaselineService,
     private readonly traces: TraceBufferService,
     private readonly surreal: SurrealService,
+    private readonly ingest: IngestService,
+    private readonly search: SearchService,
   ) {}
 
   @Get('overview')
@@ -216,5 +229,81 @@ export class AdminController {
     }
     await this.surreal.dropCompanyDatabase(companyId);
     return { dropped: companyId };
+  }
+
+  // ── Live demo sandbox ──────────────────────────────────────────────
+  // Persistent demo tenant (companyId=demo_live) the presenter writes to
+  // from a chat-shaped slide. Unlike scenarios — which are ephemeral —
+  // this tenant accumulates state across mentions so the operator can
+  // show "tell brain X, ask brain X" interactively. Reset endpoint
+  // wipes the tenant between runs.
+
+  @Post('demo/ingest-mention')
+  @RequireScopes('brain:admin')
+  async demoIngestMention(@Body() body: { text: string; vertical?: string }) {
+    if (!body?.text?.trim()) {
+      throw new BadRequestException('text is required');
+    }
+    const captured = await runWithDebugTrace(() =>
+      this.ingest.ingestMention(DEMO_LIVE_COMPANY, {
+        text: body.text,
+        contextRef: { vertical: body.vertical ?? 'shop' },
+        emittedAt: new Date().toISOString(),
+      } as any),
+    );
+    return {
+      ...captured.result,
+      trace: {
+        requestId: captured.trace.requestId,
+        totalMs: captured.trace.totalMs,
+        spans: captured.trace.spans,
+        artifacts: captured.trace.artifacts,
+      },
+    };
+  }
+
+  @Post('demo/search')
+  @RequireScopes('brain:admin')
+  async demoSearch(
+    @Body()
+    body: { query: string; limit?: number; asOf?: string; includePii?: boolean },
+  ) {
+    if (!body?.query?.trim()) {
+      throw new BadRequestException('query is required');
+    }
+    const scopes = body.includePii
+      ? ['brain:read', 'brain:read_pii']
+      : ['brain:read'];
+    const captured = await runWithDebugTrace(() =>
+      this.search.search(
+        DEMO_LIVE_COMPANY,
+        {
+          query: body.query,
+          limit: body.limit ?? 5,
+          asOf: body.asOf,
+        } as any,
+        scopes as any,
+      ),
+    );
+    return {
+      results: captured.result.results,
+      trace: {
+        requestId: captured.trace.requestId,
+        totalMs: captured.trace.totalMs,
+        spans: captured.trace.spans,
+      },
+    };
+  }
+
+  @Post('demo/reset')
+  @RequireScopes('brain:admin')
+  async demoReset() {
+    try {
+      await this.surreal.dropCompanyDatabase(DEMO_LIVE_COMPANY);
+    } catch (e) {
+      // Reset is idempotent — a missing DB is a success state, not an error.
+      return { dropped: false, reason: (e as Error).message };
+    }
+    return { dropped: true };
   }
 }

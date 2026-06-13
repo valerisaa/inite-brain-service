@@ -12,6 +12,11 @@ export function IntroSlide() {
     >
       <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mt-4 max-w-3xl">
         <IntroItem
+          n="01a"
+          title="ingest from chat"
+          desc="написал фразу — увидел атомарные факты. Спросил — увидел разницу."
+        />
+        <IntroItem
           n="01"
           title="bitemporal"
           desc="«как было в феврале» — заморозить историческую правду одним asOf-параметром"

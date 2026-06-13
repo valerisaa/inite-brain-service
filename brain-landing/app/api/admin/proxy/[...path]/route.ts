@@ -21,6 +21,7 @@ const ALLOWED_PREFIXES = [
   'v1/admin/baselines',
   'v1/admin/traces',
   'v1/admin/tenants/',
+  'v1/admin/demo/',
   // Brain user-facing endpoints used by the Playground tabs
   'v1/search',
   'v1/synthesize',
