@@ -222,8 +222,22 @@ export class ExtractorService {
     // Resolve the per-tenant active predicate set. Snapshot is TTL-cached
     // in the registry; the versionHash gets pinned in the trace so a
     // downstream audit can correlate an extraction with the registry
-    // state it was made against.
-    const snapshot = await this.registry.getSnapshot(companyId);
+    // state it was made against. Defensive: a registry failure
+    // (bootstrap problem, migration not yet applied, embedder hiccup)
+    // MUST NOT 500 the extractor — fall back to the JS-seed
+    // CORE_PREDICATES so the extractor still has cards to render.
+    let snapshot: { versionHash: string; active: PredicateDefinition[] };
+    try {
+      snapshot = await this.registry.getSnapshot(companyId);
+    } catch (e) {
+      this.logger.warn(
+        `extractor: registry getSnapshot failed for ${companyId}: ${(e as Error).message}; falling back to CORE_PREDICATES seed`,
+      );
+      snapshot = {
+        versionHash: 'fallback-seed',
+        active: CORE_PREDICATES.filter((p) => p.status === 'active'),
+      };
+    }
     const systemPrompt =
       this.systemPromptHeader === EXTRACTION_PROMPT_HEADER
         ? buildSystemPrompt(snapshot.active)
@@ -453,7 +467,14 @@ export class ExtractorService {
     // novel one, or inserting it as proposed. The fact's predicate
     // field is rewritten to the canonical id before returning so
     // downstream (conflict resolver, fact upsert) treats it uniformly.
-    if (facts.length > 0) {
+    //
+    // Defensive: the whole pass is wrapped in a try — if the registry
+    // is unavailable (migration not yet applied / network blip),
+    // facts keep their model-emitted predicates and downstream
+    // policyFor() falls back to DEFAULT_POLICY. The extraction must
+    // not 500 the chat path.
+    try {
+      if (facts.length > 0) {
       const decisions: Array<{
         original: string;
         canonical: string;
@@ -506,6 +527,11 @@ export class ExtractorService {
       if (decisions.length > 0) {
         traceArtifact('extractor.canonicalize', decisions);
       }
+      }
+    } catch (e) {
+      this.logger.warn(
+        `extractor: canonicalize pass failed: ${(e as Error).message}; keeping model-emitted predicates`,
+      );
     }
 
     return { entities, facts };

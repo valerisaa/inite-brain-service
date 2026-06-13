@@ -912,26 +912,34 @@ export class PredicateRegistryService {
     if (best && best.similarity >= CANONICALIZE_AUTO_ALIAS_THRESHOLD) {
       // Insert as aliased — next time the same novel predicate appears,
       // the snapshot's aliasMap returns the canonical without an LLM
-      // round-trip.
-      await this.surreal.withCompany(companyId, async (db) => {
-        await db.query(`CREATE knowledge_predicate CONTENT $content`, {
-          content: {
-            predicateId: predicate,
-            displayLabel: predicate.replace(/_/g, ' '),
-            description: `(auto-aliased to ${best!.predicateId} at cosine ${best!.similarity.toFixed(3)})`,
-            datatype: 'string',
-            semantics: snapshot.byId.get(best!.predicateId)!.semantics,
-            decayHalfLifeDays:
-              snapshot.byId.get(best!.predicateId)!.decayHalfLifeDays,
-            piiClass: snapshot.byId.get(best!.predicateId)!.piiClass,
-            ...(queryEmb ? { embedding: queryEmb } : {}),
-            status: 'aliased',
-            aliasedTo: best!.predicateId,
-            createdBy: 'llm_auto',
-          },
+      // round-trip. Defensive: a concurrent canonicalize on the same
+      // novel predicate races on UNIQUE(predicateId); the loser logs +
+      // returns matched (next read will see the canonical anyway).
+      try {
+        await this.surreal.withCompany(companyId, async (db) => {
+          await db.query(`CREATE knowledge_predicate CONTENT $content`, {
+            content: {
+              predicateId: predicate,
+              displayLabel: predicate.replace(/_/g, ' '),
+              description: `(auto-aliased to ${best!.predicateId} at cosine ${best!.similarity.toFixed(3)})`,
+              datatype: 'string',
+              semantics: snapshot.byId.get(best!.predicateId)!.semantics,
+              decayHalfLifeDays:
+                snapshot.byId.get(best!.predicateId)!.decayHalfLifeDays,
+              piiClass: snapshot.byId.get(best!.predicateId)!.piiClass,
+              ...(queryEmb ? { embedding: queryEmb } : {}),
+              status: 'aliased',
+              aliasedTo: best!.predicateId,
+              createdBy: 'llm_auto',
+            },
+          });
         });
-      });
-      this.invalidate(companyId);
+        this.invalidate(companyId);
+      } catch (e) {
+        this.logger.warn(
+          `canonicalize: auto-alias insert failed for '${predicate}' → '${best!.predicateId}': ${(e as Error).message}`,
+        );
+      }
       return {
         kind: 'aliased',
         canonicalId: best.predicateId,
@@ -942,27 +950,33 @@ export class PredicateRegistryService {
 
     // Below threshold — propose. Inherits DEFAULT policy until an
     // operator (or a future LLM-classify pass) sets the proper one.
-    await this.surreal.withCompany(companyId, async (db) => {
-      await db.query(`CREATE knowledge_predicate CONTENT $content`, {
-        content: {
-          predicateId: predicate,
-          displayLabel: predicate.replace(/_/g, ' '),
-          description: `(auto-proposed; awaiting review. Closest existing: ${
-            best
-              ? `${best.predicateId} @ cosine ${best.similarity.toFixed(3)}`
-              : 'none'
-          })`,
-          datatype: 'string',
-          semantics: DEFAULT_FALLBACK.semantics,
-          decayHalfLifeDays: DEFAULT_FALLBACK.decayHalfLifeDays,
-          piiClass: DEFAULT_FALLBACK.piiClass,
-          ...(queryEmb ? { embedding: queryEmb } : {}),
-          status: 'proposed',
-          createdBy: 'llm_auto',
-        },
+    try {
+      await this.surreal.withCompany(companyId, async (db) => {
+        await db.query(`CREATE knowledge_predicate CONTENT $content`, {
+          content: {
+            predicateId: predicate,
+            displayLabel: predicate.replace(/_/g, ' '),
+            description: `(auto-proposed; awaiting review. Closest existing: ${
+              best
+                ? `${best.predicateId} @ cosine ${best.similarity.toFixed(3)}`
+                : 'none'
+            })`,
+            datatype: 'string',
+            semantics: DEFAULT_FALLBACK.semantics,
+            decayHalfLifeDays: DEFAULT_FALLBACK.decayHalfLifeDays,
+            piiClass: DEFAULT_FALLBACK.piiClass,
+            ...(queryEmb ? { embedding: queryEmb } : {}),
+            status: 'proposed',
+            createdBy: 'llm_auto',
+          },
+        });
       });
-    });
-    this.invalidate(companyId);
+      this.invalidate(companyId);
+    } catch (e) {
+      this.logger.warn(
+        `canonicalize: proposed insert failed for '${predicate}': ${(e as Error).message}`,
+      );
+    }
     return {
       kind: 'proposed',
       canonicalId: predicate,

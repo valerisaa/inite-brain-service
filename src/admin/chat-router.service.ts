@@ -83,9 +83,22 @@ export class ChatRouterService {
     // Per-tenant predicate vocabulary for the predicateHints enum. Snapshot
     // is cached in the registry; reading is sub-millisecond after the first
     // call. The versionHash is pinned so the trace ties this route to the
-    // exact registry state.
-    const snapshot = await this.registry.getSnapshot(options.companyId);
-    const predicateVocab = snapshot.active.map((p) => p.predicateId);
+    // exact registry state. Defensive: a registry failure (bootstrap
+    // problem, migration not yet applied, embedder hiccup) MUST NOT 500
+    // the chat — fall back to an empty vocab so the JSON-schema enum is
+    // permissive and the request still goes through.
+    let snapshot:
+      | { versionHash: string; active: { predicateId: string }[] }
+      | null = null;
+    try {
+      snapshot = await this.registry.getSnapshot(options.companyId);
+    } catch (e) {
+      this.logger.warn(
+        `chat router: registry getSnapshot failed for ${options.companyId}: ${(e as Error).message}; falling back to permissive vocab`,
+      );
+    }
+    const predicateVocab =
+      snapshot?.active.map((p) => p.predicateId) ?? [];
     const system = `You route a free-form chat message to a knowledge-graph backend.
 
 Decide intent:
@@ -237,7 +250,7 @@ message: ${message}`;
         system,
         user,
         model: this.model,
-        registryVersionHash: snapshot.versionHash,
+        registryVersionHash: snapshot?.versionHash ?? 'unavailable',
         predicateCount: predicateVocab.length,
       });
       const res = await this.openai.chat.completions.create({
@@ -261,7 +274,10 @@ message: ${message}`;
                 entityRefs: { type: 'array', items: { type: 'string' } },
                 predicateHints: {
                   type: 'array',
-                  items: { type: 'string', enum: predicateVocab },
+                  items:
+                    predicateVocab.length > 0
+                      ? { type: 'string', enum: predicateVocab }
+                      : { type: 'string' },
                   description:
                     'Closed-vocab predicates the question is asking about. Used as a hard AND-filter in graph retrieval so we do not dump every fact of the subject. Empty for general/unknown questions and ALWAYS empty for intent=tell.',
                 },
