@@ -131,7 +131,17 @@ export class AdminController {
             errors: [{ step: -1, kind: 'runtime', error: (e as Error).message }],
           },
           queryResults: [],
-          metrics: { recallAt1: 0, recallAt5: 0, queries: 0, passes: 0 },
+          memoryAssertionResults: [],
+          metrics: {
+            recallAt1: 0,
+            recallAt5: 0,
+            queries: 0,
+            passes: 0,
+            memoryAssertionsPassed: 0,
+            memoryAssertionsTotal: 0,
+            piiGatingPassed: 0,
+            piiGatingTotal: 0,
+          },
         });
       }
     }

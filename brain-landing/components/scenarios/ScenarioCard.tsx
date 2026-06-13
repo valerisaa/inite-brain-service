@@ -39,7 +39,11 @@ export function ScenarioCard({ s }: { s: ScenarioSummary }) {
         <span>{s.queries} queries</span>
         {s.hasMemoryAssertions && <span>· mem-assert</span>}
         {s.hasIdentityMerge && <span>· identity</span>}
-        {s.hasSynthesize && <span>· synth</span>}
+        {s.hasSynthesize && (
+          <span className="text-[var(--warning)]" title="synthesize queries are not auto-validated by the admin runner">
+            · synth (skipped)
+          </span>
+        )}
       </div>
     </Link>
   )

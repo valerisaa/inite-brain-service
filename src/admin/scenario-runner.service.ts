@@ -44,8 +44,33 @@ export interface ScenarioQueryResult {
     externalRefs: Record<string, string>;
   }>;
   passed: boolean;
+  /**
+   * PII-gating outcome. null when the expectation didn't declare
+   * mustNotLeakPredicate; true iff the gated predicate did NOT surface
+   * under the matched entity when called with a limited-scope caller.
+   */
+  piiGatedCorrectly: boolean | null;
+  /** The gated predicate the scenario asserted (when applicable). */
+  mustNotLeakPredicate?: string;
   /** Set when the search call itself threw — diagnostic context for passed:false. */
   error?: string;
+}
+
+export interface MemoryAssertionResult {
+  description: string;
+  kind: 'no_search_match' | 'search_object_present' | 'search_object_absent';
+  passed: boolean;
+  detail?: string;
+  durationMs: number;
+}
+
+export interface IdentityMergeOutcomeShape {
+  survivorRef: string;
+  loserRef: string;
+  merged: boolean;
+  falseMerges: string[];
+  unresolvedDistractors: string[];
+  detail?: string;
 }
 
 export interface ScenarioRunOutcome {
@@ -64,11 +89,26 @@ export interface ScenarioRunOutcome {
     errors: Array<{ step: number; kind: string; error: string }>;
   };
   queryResults: ScenarioQueryResult[];
+  memoryAssertionResults: MemoryAssertionResult[];
+  identityMergeResult?: IdentityMergeOutcomeShape;
+  /**
+   * Synthesize-faithfulness verification (RAGAS-style claim decomposition)
+   * is not implemented in the admin runner — it lives in test/eval/runner/
+   * faithfulness-checker which requires the SDK + an Anthropic verifier
+   * model. When a scenario declares synthesizeQueries we surface them as
+   * skipped here so the UI can render an honest "not validated" badge
+   * instead of pretending the run was complete.
+   */
+  synthesizeSkipped?: { count: number; reason: string };
   metrics: {
     recallAt1: number;
     recallAt5: number;
     queries: number;
     passes: number;
+    memoryAssertionsPassed: number;
+    memoryAssertionsTotal: number;
+    piiGatingPassed: number;
+    piiGatingTotal: number;
   };
 }
 
@@ -145,14 +185,42 @@ export class ScenarioRunnerService {
         }
       }
 
+      // identityMerge runs after setup (link is itself a setup step,
+      // but the assertion side — resolving survivor / loser / distractor
+      // entityIds and checking same-vs-distinct — only makes sense once
+      // every fact has been ingested).
+      const identityMergeResult = scenario.identityMerge
+        ? await this.runIdentityMerge(companyId, scenario.identityMerge)
+        : undefined;
+
+      const memoryAssertionResults: MemoryAssertionResult[] = [];
+      for (const a of scenario.memoryAssertions ?? []) {
+        memoryAssertionResults.push(await this.runMemoryAssertion(companyId, a));
+      }
+
       const queryResults: ScenarioQueryResult[] = [];
       for (const q of scenario.queries) {
         queryResults.push(await this.runQuery(companyId, q));
       }
 
       const passes = queryResults.filter((q) => q.passed).length;
+      const memPassed = memoryAssertionResults.filter((r) => r.passed).length;
+      const piiResults = queryResults.filter(
+        (q) => q.piiGatedCorrectly !== null,
+      );
+      const piiPassed = piiResults.filter((q) => q.piiGatedCorrectly).length;
+
+      const identityOk = identityMergeResult
+        ? identityMergeResult.merged &&
+          identityMergeResult.falseMerges.length === 0 &&
+          identityMergeResult.unresolvedDistractors.length === 0
+        : true;
+
       const passedAll =
-        setupSummary.errors.length === 0 && passes === queryResults.length;
+        setupSummary.errors.length === 0 &&
+        passes === queryResults.length &&
+        memPassed === memoryAssertionResults.length &&
+        identityOk;
 
       return {
         scenarioId: scenario.id,
@@ -163,6 +231,17 @@ export class ScenarioRunnerService {
         passed: passedAll,
         setupSummary,
         queryResults,
+        memoryAssertionResults,
+        identityMergeResult,
+        ...(scenario.synthesizeQueries?.length
+          ? {
+              synthesizeSkipped: {
+                count: scenario.synthesizeQueries.length,
+                reason:
+                  'RAGAS-style faithfulness verifier not ported to admin runner — synthesizeQueries cannot be auto-validated here yet.',
+              },
+            }
+          : {}),
         metrics: {
           recallAt1: queryResults.length
             ? queryResults.filter((q) => q.rankOfExpected === 1).length /
@@ -175,6 +254,10 @@ export class ScenarioRunnerService {
             : 0,
           queries: queryResults.length,
           passes,
+          memoryAssertionsPassed: memPassed,
+          memoryAssertionsTotal: memoryAssertionResults.length,
+          piiGatingPassed: piiPassed,
+          piiGatingTotal: piiResults.length,
         },
       };
     } finally {
@@ -322,10 +405,13 @@ export class ScenarioRunnerService {
     expectation: QueryExpectation,
   ): Promise<ScenarioQueryResult> {
     const t0 = Date.now();
-    const callerScopes = expectation.callerScopes ?? [
-      'brain:read',
-      'brain:read_pii',
-    ];
+    const isPiiGated = expectation.mustNotLeakPredicate !== undefined;
+    // PII-gating expectations simulate a non-PII caller — brain strips
+    // read_pii-scoped facts server-side, so the gated predicate must NOT
+    // come back. Non-gated queries default to the full-access scope set.
+    const callerScopes =
+      expectation.callerScopes ??
+      (isPiiGated ? ['brain:read'] : ['brain:read', 'brain:read_pii']);
 
     let hits: SearchHit[] = [];
     let error: string | undefined;
@@ -361,10 +447,23 @@ export class ScenarioRunnerService {
           )
         : null;
 
+    // Fact-level PII gating verdict — mirrors test/eval/runner/query-executor.
+    // Vacuously safe when the entity didn't surface at all. Leak iff the
+    // matched entity carries a fact with the gated predicate.
+    let piiGatedCorrectly: boolean | null = null;
+    if (isPiiGated) {
+      const hit = rankOfExpected > 0 ? hits[rankOfExpected - 1] : null;
+      const leaked = hit?.facts.some(
+        (f) => f.predicate === expectation.mustNotLeakPredicate,
+      );
+      piiGatedCorrectly = !leaked;
+    }
+
     const passed =
       !error &&
       rankOfExpected === 1 &&
-      (factPredicateMatched === null ? true : factPredicateMatched);
+      (factPredicateMatched === null ? true : factPredicateMatched) &&
+      (piiGatedCorrectly === null ? true : piiGatedCorrectly);
 
     return {
       query: expectation.query,
@@ -382,9 +481,187 @@ export class ScenarioRunnerService {
         externalRefs: h.externalRefs ?? {},
       })),
       passed,
+      piiGatedCorrectly,
+      ...(expectation.mustNotLeakPredicate
+        ? { mustNotLeakPredicate: expectation.mustNotLeakPredicate }
+        : {}),
       ...(error ? { error } : {}),
     };
   }
+
+  // ── Memory-lifecycle assertions ────────────────────────────────────
+  // After-setup invariants. Each assertion is independent — a failure
+  // doesn't short-circuit the rest. Mirrors test/eval/runner/memory-
+  // assertions.ts but talks directly to SearchService instead of through
+  // the SDK so it stays in-process.
+
+  private async runMemoryAssertion(
+    companyId: string,
+    a: NonNullable<Scenario['memoryAssertions']>[number],
+  ): Promise<MemoryAssertionResult> {
+    const t0 = Date.now();
+    const finalize = (
+      passed: boolean,
+      detail?: string,
+    ): MemoryAssertionResult => ({
+      description: a.description,
+      kind: a.kind,
+      passed,
+      detail,
+      durationMs: Date.now() - t0,
+    });
+
+    try {
+      if (!a.query) {
+        return finalize(false, 'assertion missing query');
+      }
+
+      const res = await this.search.search(
+        companyId,
+        {
+          query: a.query,
+          limit: 20,
+          asOf: a.asOf,
+          includeRetracted: a.includeRetracted ?? false,
+        } as any,
+        ['brain:read', 'brain:read_pii'] as any,
+      );
+
+      if (a.kind === 'no_search_match') {
+        if (!a.expectedRefAbsent) return finalize(false, 'missing expectedRefAbsent');
+        const refTag = parseRefTag(a.expectedRefAbsent);
+        const matched = res.results.find(
+          (r) => r.externalRefs && r.externalRefs[refTag.refKey] === refTag.id,
+        );
+        if (matched) {
+          return finalize(
+            false,
+            `expected '${a.expectedRefAbsent}' to be absent but surfaced (canonicalName=${matched.canonicalName})`,
+          );
+        }
+        return finalize(true);
+      }
+
+      if (a.kind === 'search_object_present') {
+        if (!a.expectedRefPresent || !a.objectSubstring) {
+          return finalize(false, 'missing expectedRefPresent or objectSubstring');
+        }
+        const refTag = parseRefTag(a.expectedRefPresent);
+        const matched = res.results.find(
+          (r) => r.externalRefs && r.externalRefs[refTag.refKey] === refTag.id,
+        );
+        if (!matched) {
+          return finalize(
+            false,
+            `expected '${a.expectedRefPresent}' to surface but did not (top=${res.results[0]?.canonicalName ?? 'none'})`,
+          );
+        }
+        const needle = a.objectSubstring.toLowerCase();
+        const hasObj = matched.facts.some((f) =>
+          f.object.toLowerCase().includes(needle),
+        );
+        if (!hasObj) {
+          return finalize(
+            false,
+            `'${a.expectedRefPresent}' surfaced but no fact object matched substring '${a.objectSubstring}'`,
+          );
+        }
+        return finalize(true);
+      }
+
+      // search_object_absent
+      if (!a.expectedRefAbsent || !a.objectSubstring) {
+        return finalize(false, 'missing expectedRefAbsent or objectSubstring');
+      }
+      const refTag = parseRefTag(a.expectedRefAbsent);
+      const matched = res.results.find(
+        (r) => r.externalRefs && r.externalRefs[refTag.refKey] === refTag.id,
+      );
+      if (!matched) return finalize(true);
+      const needle = a.objectSubstring.toLowerCase();
+      const offending = matched.facts.find((f) =>
+        f.object.toLowerCase().includes(needle),
+      );
+      if (offending) {
+        return finalize(
+          false,
+          `'${a.expectedRefAbsent}' should not have surfaced fact containing '${a.objectSubstring}' but did (factId=${offending.factId} status=${offending.status})`,
+        );
+      }
+      return finalize(true);
+    } catch (e) {
+      return finalize(false, `assertion threw: ${(e as Error).message}`);
+    }
+  }
+
+  // ── Identity-merge assertion ───────────────────────────────────────
+  // Resolves survivor + loser by externalRef. After setup (which already
+  // contains the identity_of link as a SetupLinkStep), brain's search-side
+  // re-attribution surfaces survivor + loser as the SAME entityId. We then
+  // walk shouldNotMerge distractors and assert they resolve to different
+  // entityIds — guards against over-merge regressions.
+
+  private async runIdentityMerge(
+    companyId: string,
+    merge: NonNullable<Scenario['identityMerge']>,
+  ): Promise<IdentityMergeOutcomeShape> {
+    const survivor = await this.findEntityIdByRef(companyId, merge.survivorRef);
+    const loser = await this.findEntityIdByRef(companyId, merge.loserRef);
+    if (!survivor || !loser) {
+      return {
+        survivorRef: merge.survivorRef,
+        loserRef: merge.loserRef,
+        merged: false,
+        falseMerges: [],
+        unresolvedDistractors: merge.shouldNotMerge ?? [],
+        detail: 'could not resolve survivor or loser externalRef',
+      };
+    }
+
+    const merged = survivor === loser;
+    const falseMerges: string[] = [];
+    const unresolvedDistractors: string[] = [];
+    for (const ref of merge.shouldNotMerge ?? []) {
+      const distractor = await this.findEntityIdByRef(companyId, ref);
+      if (!distractor) {
+        unresolvedDistractors.push(ref);
+        continue;
+      }
+      if (distractor === survivor) falseMerges.push(ref);
+    }
+
+    return {
+      survivorRef: merge.survivorRef,
+      loserRef: merge.loserRef,
+      merged,
+      falseMerges,
+      unresolvedDistractors,
+    };
+  }
+
+  private async findEntityIdByRef(
+    companyId: string,
+    ref: string,
+  ): Promise<string | null> {
+    const [vertical, id] = ref.split('.', 2);
+    const refTag = `${safe(vertical)}__${safe(id)}`;
+    try {
+      const res = await this.search.search(
+        companyId,
+        { query: id, limit: 10 } as any,
+        ['brain:read', 'brain:read_pii'] as any,
+      );
+      const hit = res.results.find((r) => r.externalRefs?.[refTag] === id);
+      return hit?.entityId ?? null;
+    } catch {
+      return null;
+    }
+  }
+}
+
+function parseRefTag(ref: string): { refKey: string; id: string } {
+  const [vertical, id] = ref.split('.', 2);
+  return { refKey: `${safe(vertical)}__${safe(id)}`, id };
 }
 
 function formatTopRef(refs: Record<string, string> | undefined): string | null {
