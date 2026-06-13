@@ -22,7 +22,12 @@ import {
   ScenarioRunOutcome,
 } from './scenario-runner.service';
 import { BaselineService } from './baseline.service';
-import { runWithDebugTrace, TraceBufferService } from '../common/debug-trace';
+import {
+  runWithDebugTrace,
+  TraceBufferService,
+  traceArtifact,
+  traceSpan,
+} from '../common/debug-trace';
 import { SurrealService } from '../db/surreal.service';
 import { IngestService } from '../ingest/ingest.service';
 import { SearchService } from '../search/search.service';
@@ -315,16 +320,11 @@ export class AdminController {
     body: {
       message: string;
       includePii?: boolean;
-      /** 'vector' = current pipeline (vector/lexical fusion + rerank).
-       *  'graph'  = resolve entity by name and fetch its facts directly.
-       *             Best when the query names a subject. */
-      mode?: 'vector' | 'graph';
     },
   ) {
     if (!body?.message?.trim()) {
       throw new BadRequestException('message is required');
     }
-    const mode = body.mode ?? 'vector';
     const captured = await runWithDebugTrace(async () => {
       // Pull current canonical names so the router can rewrite short
       // references ("Maria") into their canonical form ("Maria Petrov")
@@ -367,21 +367,45 @@ export class AdminController {
         ? ['brain:read', 'brain:read_pii']
         : ['brain:read'];
       const queryText = route.cleanedQuery ?? body.message;
-      const search =
-        mode === 'graph'
-          ? await this.graphSearch(queryText, route.asOf, scopes)
-          : await this.search.search(
-              DEMO_LIVE_COMPANY,
-              {
-                query: queryText,
-                limit: 5,
-                asOf: route.asOf,
-              } as any,
-              scopes as any,
-            );
+
+      // Graph-first: try to resolve a named entity and fetch its facts
+      // straight from SurrealDB. Cheap, deterministic, no embeddings.
+      // This is the point of running brain on SurrealDB at all — vector
+      // and lexical are fallback signals for queries where the subject
+      // isn't explicit, not the primary retrieval.
+      const graph = await traceSpan('demo.graph_first', () =>
+        this.graphSearch(queryText, route.asOf, scopes),
+      );
+      const graphHasFacts = graph.results.some(
+        (r: any) => Array.isArray(r.facts) && r.facts.length > 0,
+      );
+
+      if (graphHasFacts) {
+        traceArtifact('demo.strategy', { picked: 'graph', graphHits: graph.results.length });
+        return {
+          route,
+          strategy: 'graph' as const,
+          search: { results: graph.results },
+        };
+      }
+
+      // Graph couldn't pin the subject — semantic / free-text query.
+      // Run vector + lexical fusion. Mark the response so the speaker
+      // can point at it: 'brain falls back to embeddings only when no
+      // subject is named.'
+      traceArtifact('demo.strategy', { picked: 'graph→vector', graphHits: 0 });
+      const search = await this.search.search(
+        DEMO_LIVE_COMPANY,
+        {
+          query: queryText,
+          limit: 5,
+          asOf: route.asOf,
+        } as any,
+        scopes as any,
+      );
       return {
         route,
-        mode,
+        strategy: 'graph→vector' as const,
         search: { results: search.results },
       };
     });
