@@ -217,18 +217,29 @@ Predicate hints (only for intent="ask" — slot the question into the graph):
      relevant fact.
 
 Temporal handling:
-  When intent="ask", extract any temporal anchor ("yesterday", "last month",
-  "in March", "вчера", "на прошлой неделе") and return it as an ISO 8601 asOf
+  When intent="ask" AND the question contains an EXPLICIT temporal anchor
+  ("yesterday", "last month", "in March", "next week", "вчера",
+  "на прошлой неделе"), extract it and return it as an ISO 8601 asOf
   timestamp computed relative to "now". Strip the temporal phrase from
   cleanedQuery so retrieval runs on the topical content alone.
 
+  CRITICAL — when intent="ask" and the question contains NO temporal
+  anchor (just "where does X live?", "what does X prefer?", "tell me
+  about X"), asOf MUST be null. Do NOT default to today, do NOT default
+  to "now", do NOT pick midnight of today — null means "current truth"
+  to the retriever and is what makes the most-recently-ingested fact
+  show up. Picking today-midnight is the WRONG behavior: facts
+  ingested later on the same day will appear "not yet valid" and
+  retrieval returns empty.
+
   When intent="tell" AND the message carries a temporal anchor indicating WHEN
   the asserted fact became true ("switched to keto LAST MONTH", "joined in
-  MARCH", "moved YESTERDAY"), return that as validFrom (ISO 8601). This makes
-  bitemporal facts work from chat — without it every chat-ingested fact would
-  land with validFrom=now and an as-of-past search would miss it.
-  When the tell has no temporal anchor, leave validFrom null and the ingest
-  will default to now.
+  MARCH", "moved YESTERDAY", "next month moves to Dublin"), return that
+  as validFrom (ISO 8601). This makes bitemporal facts work from chat —
+  without it every chat-ingested fact would land with validFrom=now and
+  an as-of-past or as-of-future search would miss it.
+  When the tell has no temporal anchor, leave validFrom null and the
+  ingest will default to now.
 
 Rules:
   - Always pick one of the two intents.
@@ -395,7 +406,30 @@ message: ${message}`;
         );
         if (filtered.length > 0) out.predicateHints = filtered;
       }
-      if (parsed.asOf && isValidIso(parsed.asOf)) out.asOf = parsed.asOf;
+      if (parsed.asOf && isValidIso(parsed.asOf)) {
+        // Guard against the LLM defaulting "no temporal anchor" to today's
+        // date string. JS parses bare "2026-06-13" as 2026-06-13T00:00:00Z
+        // — midnight UTC — and querying with that asOf makes facts
+        // ingested LATER on the same day appear "not yet valid", returning
+        // empty results. If the asOf is exactly at 00:00:00.000 of the
+        // current UTC day, treat as null (= "current truth", which is
+        // what the user actually meant by "no anchor").
+        const asOfDate = new Date(parsed.asOf);
+        const todayMidnightMs = new Date(
+          Date.UTC(
+            options.now?.getUTCFullYear() ?? new Date().getUTCFullYear(),
+            options.now?.getUTCMonth() ?? new Date().getUTCMonth(),
+            options.now?.getUTCDate() ?? new Date().getUTCDate(),
+          ),
+        ).getTime();
+        if (asOfDate.getTime() !== todayMidnightMs) {
+          out.asOf = parsed.asOf;
+        } else {
+          this.logger.warn(
+            `chat router: dropping asOf=${parsed.asOf} (today-midnight default from LLM with no real temporal anchor)`,
+          );
+        }
+      }
       if (parsed.validFrom && isValidIso(parsed.validFrom)) {
         out.validFrom = parsed.validFrom;
       }
