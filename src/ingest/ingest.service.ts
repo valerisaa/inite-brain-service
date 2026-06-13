@@ -70,8 +70,16 @@ export class IngestService {
 
       // 3. Read policy from the per-tenant registry. Pre-warm the snapshot
       //    so the cache is populated before the synchronous policyFor()
-      //    lookup inside fn::resolve_fact param assembly.
-      await this.predicateRegistry.getSnapshot(companyId);
+      //    lookup inside fn::resolve_fact param assembly. Defensive: a
+      //    registry bootstrap failure must not 500 the typed-fact ingest
+      //    — policyFor falls back to the JS seed.
+      try {
+        await this.predicateRegistry.getSnapshot(companyId);
+      } catch (e) {
+        this.logger.warn(
+          `ingest: predicate registry getSnapshot failed for ${companyId}: ${(e as Error).message}; using seed policy`,
+        );
+      }
       const policy = this.predicateRegistry.policyFor(companyId, dto.predicate);
       const sourceTrust = this.sourceTrustFor(dto.source);
 
@@ -478,8 +486,17 @@ export class IngestService {
     //    or compete.
     // Pre-warm the per-tenant snapshot before the synchronous policyFor()
     // — covers the early-boot case where the mention path is the first
-    // touch on this tenant.
-    await this.predicateRegistry.getSnapshot(companyId);
+    // touch on this tenant. Defensive: a registry bootstrap failure (e.g.
+    // schema mismatch on a fresh tenant) MUST NOT 500 the ingest path —
+    // policyFor falls back to the JS CORE_PREDICATES seed when the cache
+    // isn't populated.
+    try {
+      await this.predicateRegistry.getSnapshot(companyId);
+    } catch (e) {
+      this.logger.warn(
+        `ingest: predicate registry getSnapshot failed for ${companyId}: ${(e as Error).message}; using seed policy`,
+      );
+    }
     const policy = this.predicateRegistry.policyFor(companyId, predicate);
     const sourceTrust = this.sourceTrustFor(source);
     const result = await retryOnUniqueViolation(async () => {

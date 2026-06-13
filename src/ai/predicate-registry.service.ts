@@ -719,6 +719,18 @@ export class PredicateRegistryService {
         setFields.push(`${col} = $${paramKey}`);
         params[paramKey] = val;
       };
+      // For `option<...>` fields, JS null is rejected by SCHEMAFULL with
+      // "Found NULL, expected option<...>" — the wire representation of
+      // an unset option<> is NONE. Emit the literal NONE in the SET
+      // clause instead of binding via parameter when the value is null.
+      const addNullableSet = (col: string, val: unknown, paramKey: string) => {
+        if (val === null || val === undefined) {
+          setFields.push(`${col} = NONE`);
+        } else {
+          setFields.push(`${col} = $${paramKey}`);
+          params[paramKey] = val;
+        }
+      };
       if (patch.displayLabel !== undefined)
         addSet('displayLabel', next.displayLabel, 'displayLabel');
       if (patch.description !== undefined)
@@ -728,7 +740,7 @@ export class PredicateRegistryService {
       if (patch.semantics !== undefined)
         addSet('semantics', next.semantics, 'semantics');
       if (patch.decayHalfLifeDays !== undefined)
-        addSet(
+        addNullableSet(
           'decayHalfLifeDays',
           next.decayHalfLifeDays,
           'decayHalfLifeDays',
@@ -736,15 +748,15 @@ export class PredicateRegistryService {
       if (patch.piiClass !== undefined)
         addSet('piiClass', next.piiClass, 'piiClass');
       if (patch.requiresScope !== undefined)
-        addSet(
+        addNullableSet(
           'requiresScope',
-          next.requiresScope ?? null,
+          next.requiresScope,
           'requiresScope',
         );
       if (patch.status !== undefined)
         addSet('status', next.status, 'status');
       if (patch.aliasedTo !== undefined)
-        addSet('aliasedTo', next.aliasedTo ?? null, 'aliasedTo');
+        addNullableSet('aliasedTo', next.aliasedTo, 'aliasedTo');
       if (embedding) addSet('embedding', embedding, 'embedding');
       if (setFields.length === 0) return current;
       setFields.push(`updatedAt = time::now()`);
@@ -916,6 +928,7 @@ export class PredicateRegistryService {
       // novel predicate races on UNIQUE(predicateId); the loser logs +
       // returns matched (next read will see the canonical anyway).
       try {
+        const canonical = snapshot.byId.get(best!.predicateId)!;
         await this.surreal.withCompany(companyId, async (db) => {
           await db.query(`CREATE knowledge_predicate CONTENT $content`, {
             content: {
@@ -923,10 +936,12 @@ export class PredicateRegistryService {
               displayLabel: predicate.replace(/_/g, ' '),
               description: `(auto-aliased to ${best!.predicateId} at cosine ${best!.similarity.toFixed(3)})`,
               datatype: 'string',
-              semantics: snapshot.byId.get(best!.predicateId)!.semantics,
-              decayHalfLifeDays:
-                snapshot.byId.get(best!.predicateId)!.decayHalfLifeDays,
-              piiClass: snapshot.byId.get(best!.predicateId)!.piiClass,
+              semantics: canonical.semantics,
+              // option<int> — omit when null so SurrealDB stores NONE
+              ...(canonical.decayHalfLifeDays !== null
+                ? { decayHalfLifeDays: canonical.decayHalfLifeDays }
+                : {}),
+              piiClass: canonical.piiClass,
               ...(queryEmb ? { embedding: queryEmb } : {}),
               status: 'aliased',
               aliasedTo: best!.predicateId,
@@ -963,7 +978,10 @@ export class PredicateRegistryService {
             })`,
             datatype: 'string',
             semantics: DEFAULT_FALLBACK.semantics,
-            decayHalfLifeDays: DEFAULT_FALLBACK.decayHalfLifeDays,
+            // option<int> — omit when null so SurrealDB stores NONE
+            ...(DEFAULT_FALLBACK.decayHalfLifeDays !== null
+              ? { decayHalfLifeDays: DEFAULT_FALLBACK.decayHalfLifeDays }
+              : {}),
             piiClass: DEFAULT_FALLBACK.piiClass,
             ...(queryEmb ? { embedding: queryEmb } : {}),
             status: 'proposed',
@@ -991,13 +1009,21 @@ export class PredicateRegistryService {
 function serializeForInsert(
   p: PredicateDefinition,
 ): Record<string, unknown> {
+  // SurrealDB v2 SCHEMAFULL rejects JS null for `option<...>` fields with
+  // "Found NULL, expected a option<...>". The expected representation is
+  // NONE — achievable by OMITTING the field from the CREATE CONTENT
+  // object entirely. Any field declared `option<...>` in migration 0011
+  // (decayHalfLifeDays, requiresScope, parentPredicateId, subjectClasses,
+  // allowedValues, aliasedTo) must be conditionally included.
   return {
     predicateId: p.predicateId,
     displayLabel: p.displayLabel,
     description: p.description,
     datatype: p.datatype,
     semantics: p.semantics,
-    decayHalfLifeDays: p.decayHalfLifeDays,
+    ...(p.decayHalfLifeDays !== null && p.decayHalfLifeDays !== undefined
+      ? { decayHalfLifeDays: p.decayHalfLifeDays }
+      : {}),
     piiClass: p.piiClass,
     ...(p.requiresScope ? { requiresScope: p.requiresScope } : {}),
     ...(p.parentPredicateId
