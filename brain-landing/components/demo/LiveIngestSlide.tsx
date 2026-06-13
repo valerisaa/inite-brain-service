@@ -79,6 +79,7 @@ interface ChatResp {
     cleanedQuery?: string
     asOf?: string
     validFrom?: string
+    entityRefs?: string[]
     reason?: string
   }
   /** Retrieval strategy brain actually picked. graph = subject resolved by
@@ -459,6 +460,14 @@ function TurnCard({ turn }: { turn: Turn }) {
               q: “{turn.chat.route.cleanedQuery}”
             </span>
           )}
+        {turn.chat?.route?.entityRefs?.length ? (
+          <span
+            className="text-[10px] font-mono text-[var(--accent)]"
+            title="canonical entities the router pinned as subjects — graph-first looks them up directly"
+          >
+            subj: {turn.chat.route.entityRefs.join(', ')}
+          </span>
+        ) : null}
         {turn.pending && (
           <Loader2 className="w-3 h-3 animate-spin text-[var(--text-muted)] ml-auto" />
         )}

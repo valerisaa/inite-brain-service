@@ -379,14 +379,18 @@ export class AdminController {
       // and lexical are fallback signals for queries where the subject
       // isn't explicit, not the primary retrieval.
       const graph = await traceSpan('demo.graph_first', () =>
-        this.graphSearch(queryText, route.asOf, scopes),
+        this.graphSearch(queryText, route.asOf, scopes, route.entityRefs),
       );
       const graphHasFacts = graph.results.some(
         (r: any) => Array.isArray(r.facts) && r.facts.length > 0,
       );
 
       if (graphHasFacts) {
-        traceArtifact('demo.strategy', { picked: 'graph', graphHits: graph.results.length });
+        traceArtifact('demo.strategy', {
+          picked: 'graph',
+          graphHits: graph.results.length,
+          entityRefs: route.entityRefs ?? [],
+        });
         return {
           route,
           strategy: 'graph' as const,
@@ -398,7 +402,14 @@ export class AdminController {
       // Run vector + lexical fusion. Mark the response so the speaker
       // can point at it: 'brain falls back to embeddings only when no
       // subject is named.'
-      traceArtifact('demo.strategy', { picked: 'graph→vector', graphHits: 0 });
+      traceArtifact('demo.strategy', {
+        picked: 'graph→vector',
+        graphHits: 0,
+        entityRefs: route.entityRefs ?? [],
+        reason: route.entityRefs?.length
+          ? 'named subject(s) had no matching facts in window'
+          : 'no named subject — topical query',
+      });
       const search = await this.search.search(
         DEMO_LIVE_COMPANY,
         {
@@ -528,26 +539,61 @@ export class AdminController {
     queryText: string,
     asOf: string | undefined,
     callerScopes: string[],
+    entityRefs?: string[],
   ): Promise<{ results: any[] }> {
     return this.surreal.withScopedCompany(
       DEMO_LIVE_COMPANY,
       callerScopes,
       async (db) => {
-        const target = queryText.trim().toLowerCase();
-        if (!target) return { results: [] };
-        // Resolve entity by canonicalNameLc / aliases / substring on
-        // canonicalName so 'maria diet' still finds 'Maria Petrov'.
-        const [eRows] = await db.query<any[][]>(
-          `SELECT id, type, canonicalName, externalRefs, aliases
-             FROM knowledge_entity
-            WHERE mergedInto IS NONE
-              AND (canonicalNameLc CONTAINS $target
-                   OR canonicalNameLc = $target
-                   OR aliases CONTAINSANY [$target])
-            LIMIT 5`,
-          { target },
-        );
-        const entities = (eRows as any[]) ?? [];
+        const targetLc = queryText.trim().toLowerCase();
+        if (!targetLc && (!entityRefs || entityRefs.length === 0)) {
+          return { results: [] };
+        }
+        // Resolve entities by (a) explicit names the router identified as
+        // subjects, then (b) substring fallback where any known canonical
+        // name appears INSIDE the question text. The substring direction
+        // matters: "what does Maria eat" must find the entity "Maria" —
+        // NOT entities whose name contains the whole question.
+        let entities: any[] = [];
+        if (entityRefs && entityRefs.length > 0) {
+          const refsLc = entityRefs.map((n) => n.toLowerCase());
+          const [eRows] = await db.query<any[][]>(
+            `SELECT id, type, canonicalName, externalRefs, aliases
+               FROM knowledge_entity
+              WHERE mergedInto IS NONE
+                AND canonicalNameLc IN $refs
+              LIMIT 10`,
+            { refs: refsLc },
+          );
+          entities = (eRows as any[]) ?? [];
+        }
+        if (entities.length === 0 && targetLc) {
+          // Substring fallback — pull a bounded candidate set and pick names
+          // that occur INSIDE the question text. Cheap for demo-scale
+          // tenants and avoids cardinality issues from a global string
+          // search. The TOP-N here matches the demo tenant cap.
+          const [allRows] = await db.query<any[][]>(
+            `SELECT id, type, canonicalName, canonicalNameLc, externalRefs, aliases
+               FROM knowledge_entity
+              WHERE mergedInto IS NONE AND canonicalNameLc IS NOT NONE
+              LIMIT 200`,
+          );
+          const candidates = (allRows as any[]) ?? [];
+          entities = candidates
+            .filter((c: any) => {
+              const nameLc = c.canonicalNameLc;
+              if (typeof nameLc !== 'string' || nameLc.length < 2) return false;
+              return targetLc.includes(nameLc);
+            })
+            // Prefer longer names so "Maria Petrov" beats "Maria" when both
+            // are present.
+            .sort(
+              (a: any, b: any) =>
+                String(b.canonicalNameLc).length -
+                String(a.canonicalNameLc).length,
+            )
+            .slice(0, 5);
+        }
         if (entities.length === 0) return { results: [] };
         // Active-now bitemporal closure mirrors search.service.ts's
         // default 'present truth' shape. asOf swaps it for a historical
@@ -577,22 +623,47 @@ export class AdminController {
           factsByEntity.set(String(ent.id), (fRows as any[]) ?? []);
         }
         return {
-          results: entities.map((ent: any) => ({
-            entityId: String(ent.id),
-            canonicalName: ent.canonicalName,
-            entityType: ent.type,
-            externalRefs: ent.externalRefs ?? {},
-            score: 1,
-            facts: (factsByEntity.get(String(ent.id)) ?? []).map((f: any) => ({
-              factId: String(f.id),
-              predicate: f.predicate,
-              object: f.object,
-              confidence: f.confidence,
-              status: f.status,
-              validFrom: f.validFrom,
-              ...(f.validUntil ? { validUntil: f.validUntil } : {}),
-            })),
-          })),
+          results: entities.map((ent: any) => {
+            const raw = factsByEntity.get(String(ent.id)) ?? [];
+            // Collapse identical-shape active facts (same predicate+object).
+            // Fact-level dedup is a runtime concern of dreams.dedup but the
+            // demo can't wait for the sweep — for an entity that's been
+            // mentioned N times the graph holds N copies of (subject, name,
+            // canonical-name). Keep the most-recently-recorded representative.
+            const byKey = new Map<string, any>();
+            for (const f of raw) {
+              const key = `${f.predicate}::${typeof f.object === 'string' ? f.object : JSON.stringify(f.object)}`;
+              const prev = byKey.get(key);
+              if (
+                !prev ||
+                new Date(f.recordedAt ?? 0).getTime() >
+                  new Date(prev.recordedAt ?? 0).getTime()
+              ) {
+                byKey.set(key, f);
+              }
+            }
+            const deduped = Array.from(byKey.values()).sort(
+              (a: any, b: any) =>
+                new Date(b.recordedAt ?? 0).getTime() -
+                new Date(a.recordedAt ?? 0).getTime(),
+            );
+            return {
+              entityId: String(ent.id),
+              canonicalName: ent.canonicalName,
+              entityType: ent.type,
+              externalRefs: ent.externalRefs ?? {},
+              score: 1,
+              facts: deduped.map((f: any) => ({
+                factId: String(f.id),
+                predicate: f.predicate,
+                object: f.object,
+                confidence: f.confidence,
+                status: f.status,
+                validFrom: f.validFrom,
+                ...(f.validUntil ? { validUntil: f.validUntil } : {}),
+              })),
+            };
+          }),
         };
       },
     );

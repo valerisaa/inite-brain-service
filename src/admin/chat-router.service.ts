@@ -37,6 +37,12 @@ export interface ChatRoute {
    *  should land facts with validFrom one month earlier so as-of-now
    *  search sees keto and as-of-two-months-ago sees vegan. */
   validFrom?: string;
+  /** Known canonical names that the LLM identifies as the SUBJECT(s) of the
+   *  question. Drives graph-first retrieval: instead of trying to substring
+   *  match the full sentence against entity names (which never works), we
+   *  directly look up the named entities the operator is asking about.
+   *  Empty when the query is topical with no named subject. */
+  entityRefs?: string[];
   /** Free-text rationale the LLM gave — surfaced only for the debug trace. */
   reason?: string;
 }
@@ -76,11 +82,31 @@ duplicate people / orgs across mentions):
   name, rewrite the message to use the full canonical form.
 
   Example: known names = ["Maria Petrov", "Acme"], message = "Maria switched to keto"
-    → normalizedMessage = "Maria Petrov switched to keto"
+    → normalizedMessage = "Maria Petrov now prefers keto"
     → cleanedQuery     = "Maria Petrov diet" (for ask intent)
 
   If the short reference matches MORE than one known name, do NOT rewrite —
   leave the original message in place and let the operator clarify.
+
+Tell normalisation (to keep extraction predicates clean):
+  When intent="tell" describes a change of state — "switched to X", "now uses X",
+  "moved to X", "changed to X", "started X" — rewrite normalizedMessage with a
+  present-tense predicate that names the resulting state directly:
+    "switched to keto"     → "now prefers keto"
+    "moved to Berlin"      → "now lives in Berlin"
+    "started using Stripe" → "uses Stripe"
+  This lets the downstream extractor classify the fact as a stable preference /
+  location / tool instead of a transient "intent" or "action" predicate. Combined
+  with validFrom this is what makes bitemporal "what did X eat 2 months ago"
+  return the previous state.
+
+Entity references (CRITICAL for retrieval):
+  Return entityRefs — the subset of "known canonical names" that the
+  message is ABOUT. For "what does Maria eat" with known=["Maria Petrov"],
+  return ["Maria Petrov"]. For "what does Maria eat in Berlin" return
+  ["Maria Petrov", "Berlin"] only if Berlin is in known. This drives
+  graph-first lookup — without it the backend has to fall back to vector
+  search every time. If no known name is referenced, return [].
 
 Temporal handling:
   When intent="ask", extract any temporal anchor ("yesterday", "last month",
@@ -131,6 +157,7 @@ message: ${message}`;
                 intent: { type: 'string', enum: ['tell', 'ask'] },
                 normalizedMessage: { type: ['string', 'null'] },
                 cleanedQuery: { type: ['string', 'null'] },
+                entityRefs: { type: 'array', items: { type: 'string' } },
                 asOf: { type: ['string', 'null'] },
                 validFrom: { type: ['string', 'null'] },
                 reason: { type: ['string', 'null'] },
@@ -139,6 +166,7 @@ message: ${message}`;
                 'intent',
                 'normalizedMessage',
                 'cleanedQuery',
+                'entityRefs',
                 'asOf',
                 'validFrom',
                 'reason',
@@ -167,6 +195,7 @@ message: ${message}`;
         intent: 'tell' | 'ask';
         normalizedMessage: string | null;
         cleanedQuery: string | null;
+        entityRefs?: string[];
         asOf: string | null;
         validFrom: string | null;
         reason: string | null;
@@ -197,6 +226,13 @@ message: ${message}`;
         out.normalizedMessage = parsed.normalizedMessage;
       }
       if (parsed.cleanedQuery) out.cleanedQuery = parsed.cleanedQuery;
+      // Only keep entityRefs that are actually in the known list — guard
+      // against hallucinated names that wouldn't resolve anyway.
+      if (Array.isArray(parsed.entityRefs) && parsed.entityRefs.length > 0) {
+        const known = new Set(knownNames);
+        const filtered = parsed.entityRefs.filter((n) => known.has(n));
+        if (filtered.length > 0) out.entityRefs = filtered;
+      }
       if (parsed.asOf && isValidIso(parsed.asOf)) out.asOf = parsed.asOf;
       if (parsed.validFrom && isValidIso(parsed.validFrom)) {
         out.validFrom = parsed.validFrom;
