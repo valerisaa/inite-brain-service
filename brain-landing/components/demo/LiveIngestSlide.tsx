@@ -45,6 +45,12 @@ interface FactPolicy {
   requiresScope: string | null
 }
 
+interface FactMatch {
+  vector: number | null
+  lexical: number | null
+  backfill: boolean
+}
+
 interface BrainFact {
   factId: string
   predicate: string
@@ -54,6 +60,7 @@ interface BrainFact {
   validFrom: string
   validUntil?: string
   policy?: FactPolicy
+  match?: FactMatch
 }
 
 interface SearchHit {
@@ -569,6 +576,7 @@ function SearchBody({
                 {r.score.toFixed(3)}
               </span>
             </div>
+            <HitWhy facts={r.facts} />
             <ul className="mt-2 space-y-1.5">
               {r.facts.slice(0, 5).map((f) => (
                 <FactRow key={f.factId} fact={f} />
@@ -593,6 +601,7 @@ function FactRow({ fact }: { fact: BrainFact }) {
         <span className="text-[var(--text)] flex-1 break-words">
           {fact.object}
         </span>
+        {fact.match && <MatchBadge match={fact.match} />}
         {fact.policy && <PiiBadge piiClass={fact.policy.piiClass} />}
         <StatusBadge status={status} />
       </div>
@@ -617,6 +626,70 @@ function FactRow({ fact }: { fact: BrainFact }) {
         </span>
       </div>
     </li>
+  )
+}
+
+function MatchBadge({ match }: { match: FactMatch }) {
+  if (match.backfill) {
+    return (
+      <span
+        className="text-[9px] uppercase tracking-wider px-1.5 py-0.5 rounded bg-[var(--bg-overlay)] text-[var(--text-faint)]"
+        title="brought in by bitemporal closure on the matched entity — did not hit any retrieval leg directly"
+      >
+        backfill
+      </span>
+    )
+  }
+  const parts: string[] = []
+  if (match.vector !== null) parts.push(`vec ${match.vector.toFixed(2)}`)
+  if (match.lexical !== null) parts.push(`lex ${match.lexical.toFixed(2)}`)
+  return (
+    <span
+      className="text-[9px] uppercase tracking-wider px-1.5 py-0.5 rounded bg-[var(--accent)]/15 text-[var(--accent)]"
+      title="retrieval signal: vector = query-embedding cosine on the fact's embedding; lexical = BM25 on predicate + object haystack"
+    >
+      {parts.join(' · ')}
+    </span>
+  )
+}
+
+function HitWhy({ facts }: { facts: BrainFact[] }) {
+  // Summarise which facts (predicate=object) carried the entity into
+  // the result set vs which rode along as backfill. This is the
+  // 'why is Vasya here when I asked about Maria' answer.
+  const matched = facts.filter((f) => f.match && !f.match.backfill)
+  if (matched.length === 0) {
+    return (
+      <div className="ml-7 mt-0.5 text-[10px] font-mono text-[var(--text-faint)]">
+        no direct match — entity came back via neighbour graph / rerank
+      </div>
+    )
+  }
+  const top = matched
+    .slice()
+    .sort((a, b) => {
+      const av = a.match!.vector ?? a.match!.lexical ?? 0
+      const bv = b.match!.vector ?? b.match!.lexical ?? 0
+      return bv - av
+    })[0]
+  const sig =
+    top.match!.vector !== null
+      ? `vector cosine ${top.match!.vector.toFixed(2)}`
+      : `BM25 ${top.match!.lexical!.toFixed(2)}`
+  return (
+    <div className="ml-7 mt-0.5 text-[10px] font-mono text-[var(--text-faint)]">
+      matched on{' '}
+      <span className="text-[var(--accent)]">
+        {top.predicate}={top.object}
+      </span>{' '}
+      via {sig}
+      {matched.length > 1 && (
+        <span className="text-[var(--text-faint)]">
+          {' '}
+          (+{matched.length - 1} other matched fact{matched.length > 2 ? 's' : ''})
+        </span>
+      )}
+    </div>
   )
 }
 

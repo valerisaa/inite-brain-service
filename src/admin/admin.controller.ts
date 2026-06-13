@@ -289,7 +289,10 @@ export class AdminController {
       ),
     );
     return {
-      results: this.enrichResults(captured.result.results),
+      results: this.enrichResults(
+        captured.result.results,
+        captured.trace.artifacts,
+      ),
       trace: {
         requestId: captured.trace.requestId,
         totalMs: captured.trace.totalMs,
@@ -365,9 +368,19 @@ export class AdminController {
       );
       return {
         route,
-        search: { results: this.enrichResults(search.results) },
+        search: { results: search.results },
       };
     });
+    // enrichResults needs the trace artifacts; do it on the way out so
+    // the explainer can read what the search legs returned.
+    if (captured.result.search) {
+      captured.result.search = {
+        results: this.enrichResults(
+          captured.result.search.results,
+          captured.trace.artifacts,
+        ),
+      };
+    }
     return {
       ...captured.result,
       trace: {
@@ -399,16 +412,50 @@ export class AdminController {
   }
 
   /**
-   * Enrich every fact on a brain search-hit with its predicate policy
-   * (piiClass / semantics / decay / requiresScope). The demo deck renders
-   * these as the four "axes of a fact" the talk's anatomy slide promises
-   * — the search response itself stays untouched for non-demo callers.
+   * Enrich every fact on a brain search-hit with predicate policy AND a
+   * match explainer — which retrieval leg surfaced this fact and at what
+   * score, or 'backfill' if it rode along via the bitemporal closure
+   * because its entity was already in the top-K from another fact.
+   *
+   * The vector_hits / lexical_hits artifacts come straight from the
+   * search.service.ts traceArtifact calls — factId is the join key.
    */
-  private enrichResults(results: any[]): any[] {
+  private enrichResults(
+    results: any[],
+    artifacts: Array<{ name: string; value: unknown }> = [],
+  ): any[] {
+    const vec = new Map<string, number>();
+    const lex = new Map<string, number>();
+    for (const a of artifacts) {
+      if (a.name === 'search.vector_hits' && Array.isArray(a.value)) {
+        for (const row of a.value as Array<Record<string, unknown>>) {
+          const id = String(row.factId ?? '');
+          const s = typeof row.simScore === 'number' ? row.simScore : null;
+          if (id && s !== null) vec.set(id, s);
+        }
+      } else if (a.name === 'search.lexical_hits' && Array.isArray(a.value)) {
+        for (const row of a.value as Array<Record<string, unknown>>) {
+          const id = String(row.factId ?? '');
+          const s = typeof row.bm25Score === 'number' ? row.bm25Score : null;
+          if (id && s !== null) lex.set(id, s);
+        }
+      }
+    }
     return results.map((r) => ({
       ...r,
       facts: r.facts.map((f: any) => {
         const policy = policyFor(f.predicate);
+        const factId = String(f.factId);
+        const vScore = vec.get(factId) ?? null;
+        const lScore = lex.get(factId) ?? null;
+        const match =
+          vScore !== null || lScore !== null
+            ? {
+                vector: vScore,
+                lexical: lScore,
+                backfill: false,
+              }
+            : { vector: null, lexical: null, backfill: true };
         return {
           ...f,
           policy: {
@@ -417,6 +464,7 @@ export class AdminController {
             decayHalfLifeDays: policy.decayHalfLifeDays,
             requiresScope: policy.requiresScope ?? null,
           },
+          match,
         };
       }),
     }));
