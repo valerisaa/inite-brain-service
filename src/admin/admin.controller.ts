@@ -34,6 +34,10 @@ import { SurrealService } from '../db/surreal.service';
 import { IngestService } from '../ingest/ingest.service';
 import { SearchService } from '../search/search.service';
 import { ChatRouterService, ChatRoute } from './chat-router.service';
+import { ChatRouterCacheService } from './chat-router-cache.service';
+import { CollapsePatternService } from './collapse-pattern.service';
+import { IntentClassifierService } from './intent-classifier.service';
+import { EmbedderService } from '../ai/embedder.service';
 import {
   PredicateRegistryService,
   PredicateDefinition,
@@ -63,6 +67,10 @@ export class AdminController {
     private readonly ingest: IngestService,
     private readonly search: SearchService,
     private readonly chatRouter: ChatRouterService,
+    private readonly routeCache: ChatRouterCacheService,
+    private readonly collapsePatterns: CollapsePatternService,
+    private readonly intentClassifier: IntentClassifierService,
+    private readonly embedder: EmbedderService,
     private readonly predicateRegistry: PredicateRegistryService,
   ) {}
 
@@ -70,6 +78,38 @@ export class AdminController {
   @RequireScopes('brain:admin')
   async overview() {
     return this.admin.buildOverview();
+  }
+
+  /**
+   * Hybrid chat-router observability — surfaces the local-pre-pass
+   * cache and gate state so an operator can chart the LLM-skip rate
+   * and warmup status without scraping trace artifacts.
+   *
+   *   GET /v1/admin/router/stats?companyId=<tenant>
+   *
+   * companyId defaults to the live-demo tenant. Per-tenant figure for
+   * the collapse-pattern pool size (the only stat that's
+   * tenant-scoped); everything else is process-wide.
+   */
+  @Get('router/stats')
+  @RequireScopes('brain:admin')
+  async routerStats(
+    @Query('companyId') companyId?: string,
+  ): Promise<{
+    tenant: string;
+    routeCache: ReturnType<ChatRouterCacheService['stats']>;
+    embedderCache: ReturnType<EmbedderService['cacheStats']>;
+    intentClassifier: ReturnType<IntentClassifierService['stats']>;
+    collapsePatternPoolSize: number;
+  }> {
+    const tenant = companyId?.trim() || DEMO_LIVE_COMPANY;
+    return {
+      tenant,
+      routeCache: this.routeCache.stats(),
+      embedderCache: this.embedder.cacheStats(),
+      intentClassifier: this.intentClassifier.stats(),
+      collapsePatternPoolSize: await this.collapsePatterns.poolSize(tenant),
+    };
   }
 
   @Post('dreams/run')

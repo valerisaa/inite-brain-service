@@ -123,6 +123,28 @@ describe('IntentClassifierService — NLI primary path', () => {
     });
   });
 
+  it('stats() exposes ready/enabled/model/threshold/cacheSize for observability', async () => {
+    const svc = new IntentClassifierService(
+      mkConfig({
+        CHAT_ROUTE_NLI_MODEL: 'Xenova/test-model',
+        CHAT_ROUTE_NLI_ASK_THRESHOLD: '0.55',
+      }),
+    );
+    const cold = svc.stats();
+    expect(cold).toEqual({
+      enabled: true,
+      ready: false,
+      model: 'Xenova/test-model',
+      askThreshold: 0.55,
+      cacheSize: 0,
+    });
+    svc.setClassifierForTesting(mkPipeline(0.9));
+    await svc.classify('warm one');
+    const warm = svc.stats();
+    expect(warm.ready).toBe(true);
+    expect(warm.cacheSize).toBe(1);
+  });
+
   it('threshold tunable via CHAT_ROUTE_NLI_ASK_THRESHOLD', async () => {
     const strict = new IntentClassifierService(
       mkConfig({ CHAT_ROUTE_NLI_ASK_THRESHOLD: '0.9' }),

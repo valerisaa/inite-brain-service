@@ -91,6 +91,22 @@ export class IntentClassifierService implements OnModuleInit {
     return this.classifier !== null;
   }
 
+  stats(): {
+    enabled: boolean;
+    ready: boolean;
+    model: string;
+    askThreshold: number;
+    cacheSize: number;
+  } {
+    return {
+      enabled: this.enabled,
+      ready: this.classifier !== null,
+      model: this.modelId,
+      askThreshold: this.askThreshold,
+      cacheSize: this.cache.size,
+    };
+  }
+
   /** Test-only seam — injects a mock pipeline so unit tests can drive
    *  the NLI code path without loading the real model. */
   setClassifierForTesting(pipeline: ZeroShotPipeline | null): void {

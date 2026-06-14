@@ -101,6 +101,18 @@ export class CollapsePatternService {
     this.cache.delete(companyId);
   }
 
+  /** Per-tenant snapshot size. Loads the snapshot if not cached so the
+   *  caller (admin endpoint) gets a current figure rather than 0
+   *  pre-bootstrap. Defensive: any backend error degrades to 0. */
+  async poolSize(companyId: string): Promise<number> {
+    try {
+      const snap = await this.getSnapshot(companyId);
+      return snap.patterns.size;
+    } catch {
+      return 0;
+    }
+  }
+
   private async loadFresh(companyId: string): Promise<CollapseSnapshot> {
     return this.surreal.withCompany(companyId, async (db) => {
       try {
