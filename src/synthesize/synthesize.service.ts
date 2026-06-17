@@ -10,6 +10,7 @@ import {
   SynthesisGuardrails,
   SynthesizeDto,
 } from './dto/synthesize.dto';
+import { buildDecisionLog, type DecisionLogEntry } from './decision-log';
 
 export interface Citation {
   factId: string;
@@ -32,6 +33,13 @@ export interface SynthesizeResult {
   reason?: SynthesisReason;
   citations: Citation[];
   results: SearchHit[];
+  /**
+   * Populated only when the request was made with `explain: true`. One
+   * entry per retrieved fact, with score breakdown, retrieval-stage
+   * provenance, and a picked/rejected verdict with a deterministic
+   * rejection reason. See `decision-log.ts`.
+   */
+  decisionLog?: DecisionLogEntry[];
 }
 
 interface GeneratorOutput {
@@ -130,6 +138,7 @@ export class SynthesizeService {
     const guardrails: SynthesisGuardrails =
       dto.synthesisGuardrails ?? this.defaultGuardrails;
     const model = dto.synthesisModel ?? this.defaultModel;
+    const explain = dto.explain === true;
 
     const searchResult = await withSpan(
       'synthesize.search',
@@ -140,49 +149,33 @@ export class SynthesizeService {
 
     if (results.length === 0) {
       this.metrics?.countSynthesize('no_results');
-      return {
-        answer: null,
-        reason: 'no_results',
-        citations: [],
-        results: [],
-      };
+      return attachDecisionLog(
+        {
+          answer: null,
+          reason: 'no_results',
+          citations: [],
+          results: [],
+        },
+        explain ? [] : undefined,
+      );
     }
 
-    // Build the (factId → fact context) lookup BOTH the generator
-    // and the verifier reference. We surface compact facts only —
-    // the LLM doesn't need the score / validFrom timestamps to do
-    // grounding, and shorter prompts mean cheaper / faster calls.
-    const factIndex = new Map<
-      string,
-      Citation
-    >();
-    const factLines: string[] = [];
-    for (const r of results) {
-      for (const f of r.facts) {
-        factIndex.set(f.factId, {
-          factId: f.factId,
-          entityId: r.entityId,
-          canonicalName: r.canonicalName,
-          predicate: f.predicate,
-          object: f.object,
-        });
-        factLines.push(
-          `[${f.factId}] ${r.canonicalName} (${r.entityType}) — ${f.predicate}: ${f.object}`,
-        );
-      }
-    }
+    const { factIndex, factLines } = buildFactIndex(results);
 
     if (factIndex.size === 0) {
       // Search returned entities but they were stripped to ids by
       // outputShape='ids' / token budget. Treat as no_results for
       // synthesis purposes — we have nothing to cite.
       this.metrics?.countSynthesize('no_results');
-      return {
-        answer: null,
-        reason: 'no_results',
-        citations: [],
-        results,
-      };
+      return attachDecisionLog(
+        {
+          answer: null,
+          reason: 'no_results',
+          citations: [],
+          results,
+        },
+        explain ? buildDecisionLog(results, new Set()) : undefined,
+      );
     }
 
     let generated: GeneratorOutput;
@@ -200,27 +193,22 @@ export class SynthesizeService {
         `Synthesize generator failed: ${(err as Error).message}`,
       );
       this.metrics?.countSynthesize('generator_error');
-      return {
-        answer: null,
-        reason: 'generator_error',
-        citations: [],
-        results,
-      };
+      return attachDecisionLog(
+        {
+          answer: null,
+          reason: 'generator_error',
+          citations: [],
+          results,
+        },
+        explain ? buildDecisionLog(results, new Set()) : undefined,
+      );
     }
 
-    // Resolve cited factIds against the retrieved set. A factId
-    // not in the index is a hallucinated citation — drop it from
-    // the citations list (the verifier will typically catch the
-    // claim it backed, too). Order matches the LLM's emitted order.
-    const citations: Citation[] = [];
-    const seen = new Set<string>();
-    for (const id of generated.citedFactIds ?? []) {
-      const cite = factIndex.get(id);
-      if (cite && !seen.has(id)) {
-        seen.add(id);
-        citations.push(cite);
-      }
-    }
+    const citations = resolveCitations(generated.citedFactIds, factIndex);
+    const citedSet = new Set(citations.map((c) => c.factId));
+    const decisionLog = explain
+      ? buildDecisionLog(results, citedSet)
+      : undefined;
 
     // Sentinel "I don't know" path. Generator was honest about
     // empty grounding; no need to verify, no need to cite.
@@ -228,21 +216,23 @@ export class SynthesizeService {
       generated.answer.trim() === "I don't have grounded evidence for that."
     ) {
       this.metrics?.countSynthesize('no_grounded_evidence');
-      return {
-        answer: generated.answer,
-        reason: 'no_grounded_evidence',
-        citations: [],
-        results,
-      };
+      return attachDecisionLog(
+        {
+          answer: generated.answer,
+          reason: 'no_grounded_evidence',
+          citations: [],
+          results,
+        },
+        decisionLog,
+      );
     }
 
     if (guardrails === 'off') {
       this.metrics?.countSynthesize('ok');
-      return {
-        answer: generated.answer,
-        citations,
-        results,
-      };
+      return attachDecisionLog(
+        { answer: generated.answer, citations, results },
+        decisionLog,
+      );
     }
 
     // Verifier — the corrective guardrail. Runs in strict and
@@ -267,22 +257,13 @@ export class SynthesizeService {
     } catch (err) {
       this.logger.warn(`Synthesize verifier failed: ${(err as Error).message}`);
       this.metrics?.countSynthesize('verifier_error');
-      // In strict mode, a verifier outage MUST NOT silently let an
-      // unverified answer through. Strict ⇒ fail closed.
-      if (guardrails === 'strict') {
-        return {
-          answer: null,
-          reason: 'verifier_error',
-          citations: [],
-          results,
-        };
-      }
-      return {
-        answer: generated.answer,
-        reason: 'verifier_error',
+      return verifierErrorResult(
+        guardrails,
+        generated.answer,
         citations,
         results,
-      };
+        decisionLog,
+      );
     }
 
     return this.finalizeVerdict(
@@ -291,6 +272,7 @@ export class SynthesizeService {
       citations,
       results,
       guardrails,
+      decisionLog,
     );
   }
 
@@ -309,19 +291,29 @@ export class SynthesizeService {
     citations: Citation[],
     results: SynthesizeResult['results'],
     guardrails: SynthesisGuardrails,
+    decisionLog?: DecisionLogEntry[],
   ): SynthesizeResult {
     if (verdict === 'supported') {
       this.metrics?.countSynthesize('ok');
-      return { answer, citations, results };
+      return attachDecisionLog(
+        { answer, citations, results },
+        decisionLog,
+      );
     }
     const reason: SynthesisReason =
       verdict === 'partial' ? 'verifier_partial' : 'verifier_failed';
     this.metrics?.countSynthesize(reason);
     if (guardrails === 'lenient') {
-      return { answer, reason, citations, results };
+      return attachDecisionLog(
+        { answer, reason, citations, results },
+        decisionLog,
+      );
     }
     // strict — fail closed.
-    return { answer: null, reason, citations: [], results };
+    return attachDecisionLog(
+      { answer: null, reason, citations: [], results },
+      decisionLog,
+    );
   }
 
   private async callGenerator(
@@ -429,4 +421,94 @@ export class SynthesizeService {
     traceArtifact('synthesize.verifier_output', parsed);
     return parsed;
   }
+}
+
+// ── Pure helpers (lifted out of `synthesize()` to keep the orchestrator
+// under the cognitive-complexity gate) ────────────────────────────────
+
+interface FactIndexResult {
+  factIndex: Map<string, Citation>;
+  factLines: string[];
+}
+
+/**
+ * Build the (factId → Citation) lookup the generator/verifier consult,
+ * plus a human-readable line-per-fact list rendered into the prompts.
+ * No-IO, no DI — pure.
+ */
+function buildFactIndex(results: SearchHit[]): FactIndexResult {
+  const factIndex = new Map<string, Citation>();
+  const factLines: string[] = [];
+  for (const r of results) {
+    for (const f of r.facts) {
+      factIndex.set(f.factId, {
+        factId: f.factId,
+        entityId: r.entityId,
+        canonicalName: r.canonicalName,
+        predicate: f.predicate,
+        object: f.object,
+      });
+      factLines.push(
+        `[${f.factId}] ${r.canonicalName} (${r.entityType}) — ${f.predicate}: ${f.object}`,
+      );
+    }
+  }
+  return { factIndex, factLines };
+}
+
+/**
+ * Resolve a generator's `citedFactIds` against the retrieved index.
+ * A factId not in the index is a hallucinated citation — drop it.
+ * Preserves emission order; deduplicates.
+ */
+function resolveCitations(
+  citedFactIds: string[] | undefined,
+  factIndex: Map<string, Citation>,
+): Citation[] {
+  const citations: Citation[] = [];
+  const seen = new Set<string>();
+  for (const id of citedFactIds ?? []) {
+    const cite = factIndex.get(id);
+    if (cite && !seen.has(id)) {
+      seen.add(id);
+      citations.push(cite);
+    }
+  }
+  return citations;
+}
+
+/**
+ * Attach an optional decisionLog to a result without ternary noise at
+ * each return site. Keeps the orchestrator under the complexity gate.
+ */
+function attachDecisionLog(
+  result: SynthesizeResult,
+  decisionLog: DecisionLogEntry[] | undefined,
+): SynthesizeResult {
+  return decisionLog === undefined ? result : { ...result, decisionLog };
+}
+
+/**
+ * Verifier-error result selection: strict ⇒ fail-closed (drop answer);
+ * lenient/off ⇒ surface the answer with a `verifier_error` reason.
+ * Extracted from `synthesize()` to keep the orchestrator under the
+ * cognitive-complexity gate.
+ */
+function verifierErrorResult(
+  guardrails: SynthesisGuardrails,
+  answer: string,
+  citations: Citation[],
+  results: SearchHit[],
+  decisionLog: DecisionLogEntry[] | undefined,
+): SynthesizeResult {
+  if (guardrails === 'strict') {
+    return attachDecisionLog(
+      { answer: null, reason: 'verifier_error', citations: [], results },
+      decisionLog,
+    );
+  }
+  return attachDecisionLog(
+    { answer, reason: 'verifier_error', citations, results },
+    decisionLog,
+  );
 }

@@ -256,11 +256,27 @@ export async function expandViaEdges(
           // Wrap each FactRow in the same shape the main scoring
           // loop produces — score=0 because these facts didn't go
           // through vector/BM25 ranking. They inherit visibility via
-          // the bucket's rankScore, not per-fact score.
-          const scoredFacts = facts.map((row) => ({
-            row: { ...row, fusedScore: 0 },
-            score: 0,
-          }));
+          // the bucket's rankScore, not per-fact score. Stage tag is
+          // `edge_expansion` so DecisionLog can surface this provenance.
+          const scoredFacts = facts.map((row) => {
+            const fused = {
+              ...row,
+              fusedScore: 0,
+              stages: [...(row.stages ?? []), 'edge_expansion' as const],
+            };
+            return {
+              row: fused,
+              score: 0,
+              breakdown: {
+                fusedScore: 0,
+                confidence: row.confidence,
+                decay: 1,
+                predBoost: 1,
+                finalScore: 0,
+                stages: fused.stages,
+              },
+            };
+          });
           return {
             entityId: t.neighbourId,
             rankScore: 0,

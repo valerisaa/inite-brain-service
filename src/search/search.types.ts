@@ -1,9 +1,15 @@
+import type { ScoreBreakdown } from './internals/types';
+
 /**
  * Public response surface for /v1/search.
  *
  * Kept separate from the orchestrator so consumers (controllers,
  * multi-hop, synthesize) and the internal stage modules can import
  * the type without dragging in the full SearchService class.
+ *
+ * `breakdown` is optional and only populated when the caller requested
+ * `explain=true`. It carries the per-fact scoring components and the
+ * retrieval-stage provenance needed to render a DecisionLog.
  */
 export interface SearchHit {
   entityId: string;
@@ -19,6 +25,7 @@ export interface SearchHit {
     validUntil?: string;
     status: string;
     score: number;
+    breakdown?: ScoreBreakdown;
   }>;
   score: number;
 }

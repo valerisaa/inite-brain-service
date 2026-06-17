@@ -57,7 +57,18 @@ export function scoreRows(
       ? 1 + alpha * (predicateDist.weights[row.predicate] ?? 0)
       : 1;
     const finalScore = row.fusedScore * decay * row.confidence * predBoost;
-    return { row, score: finalScore };
+    return {
+      row,
+      score: finalScore,
+      breakdown: {
+        fusedScore: row.fusedScore,
+        confidence: row.confidence,
+        decay,
+        predBoost,
+        finalScore,
+        stages: row.stages ?? [],
+      },
+    };
   });
 }
 

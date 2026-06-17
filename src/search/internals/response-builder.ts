@@ -51,7 +51,7 @@ export function assembleHits(
       const matchedFactIds = new Set(e.facts.map((sf) => String(sf.row.id)));
       const matchedRender = e.facts
         .sort((a, b) => b.score - a.score)
-        .map(({ row, score }) => ({
+        .map(({ row, score, breakdown }) => ({
           factId: String(row.id),
           predicate: row.predicate,
           object: row.object,
@@ -60,6 +60,7 @@ export function assembleHits(
           validUntil: row.validUntil ?? undefined,
           status: row.status,
           score,
+          breakdown,
         }));
       const matchedPredicates = new Set(matchedRender.map((f) => f.predicate));
       const backfillRows = (backfillByEntity.get(e.entityId) ?? [])
@@ -83,6 +84,14 @@ export function assembleHits(
           validUntil: row.validUntil ?? undefined,
           status: row.status,
           score: 0,
+          breakdown: {
+            fusedScore: 0,
+            confidence: row.confidence,
+            decay: 1,
+            predBoost: 1,
+            finalScore: 0,
+            stages: ['backfill'],
+          },
         });
       }
       return {

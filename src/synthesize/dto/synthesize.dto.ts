@@ -1,4 +1,5 @@
-import { IsIn, IsOptional, IsString } from 'class-validator';
+import { IsBoolean, IsIn, IsOptional, IsString } from 'class-validator';
+import { Type } from 'class-transformer';
 import { SearchDto } from '../../search/dto/search.dto';
 
 export type SynthesisGuardrails = 'strict' | 'lenient' | 'off';
@@ -32,4 +33,19 @@ export class SynthesizeDto extends SearchDto {
   @IsOptional()
   @IsIn(['strict', 'lenient', 'off'])
   synthesisGuardrails?: SynthesisGuardrails;
+
+  /**
+   * Emit a per-fact reasoning trace (DecisionLog) alongside the answer.
+   * Off by default to keep the response surface stable for existing
+   * callers and to avoid leaking score components when not needed.
+   *
+   * When true, `SynthesizeResult.decisionLog` is populated with one
+   * entry per retrieved fact: scoring breakdown, retrieval-stage
+   * provenance, whether the synthesizer picked the fact for the answer,
+   * and (for losers) a brief rejection reason.
+   */
+  @IsOptional()
+  @IsBoolean()
+  @Type(() => Boolean)
+  explain?: boolean;
 }

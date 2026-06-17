@@ -39,6 +39,8 @@ export interface GraphFactRow {
   recordedAt?: string;
 }
 
+import type { ScoreBreakdown } from './types';
+
 export interface GraphRetrieveHit {
   entityId: string;
   entityType: string;
@@ -53,6 +55,7 @@ export interface GraphRetrieveHit {
     validUntil?: string;
     status: string;
     score: number;
+    breakdown?: ScoreBreakdown;
   }>;
   score: number;
 }
@@ -118,25 +121,37 @@ function renderHit(
   entityScore: number,
 ): GraphRetrieveHit {
   const deduped = dedupeAndSortFacts(rows);
+  const stage = entityScore === SEED_SCORE ? 'graph_seed' : 'graph_neighbour';
   return {
     entityId: ent.entityId,
     canonicalName: ent.canonicalName,
     entityType: ent.type,
     externalRefs: ent.externalRefs ?? {},
     score: entityScore,
-    facts: deduped.map((f) => ({
-      factId: f.factId,
-      predicate: f.predicate,
-      object: f.object,
-      confidence: f.confidence,
-      validFrom: f.validFrom,
-      validUntil: f.validUntil,
-      status: f.status,
-      score:
+    facts: deduped.map((f) => {
+      const factScore =
         hintSet.size === 0 || hintSet.has(f.predicate)
           ? HINT_MATCH_FACT_SCORE
-          : NON_HINT_FACT_SCORE,
-    })),
+          : NON_HINT_FACT_SCORE;
+      return {
+        factId: f.factId,
+        predicate: f.predicate,
+        object: f.object,
+        confidence: f.confidence,
+        validFrom: f.validFrom,
+        validUntil: f.validUntil,
+        status: f.status,
+        score: factScore,
+        breakdown: {
+          fusedScore: factScore,
+          confidence: f.confidence,
+          decay: 1,
+          predBoost: 1,
+          finalScore: factScore * f.confidence,
+          stages: [stage],
+        },
+      };
+    }),
   };
 }
 

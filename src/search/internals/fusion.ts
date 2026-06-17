@@ -1,5 +1,22 @@
 import type { SearchMode } from '../dto/search.dto';
-import type { FactRow, FusedRow } from './types';
+import type { FactRow, FusedRow, RetrievalStage } from './types';
+
+/**
+ * Idempotently add a stage label to a row's stage set. Used by fusion
+ * (initial leg tagging) and downstream stages that combine rows
+ * surfaced by multiple legs. Sentinel: keeps insertion order so the
+ * first contributor is also the "dominant" one for DecisionLog
+ * provenance display.
+ */
+function addStage<T extends { stages?: RetrievalStage[] }>(
+  row: T,
+  stage: RetrievalStage,
+): T {
+  const existing = row.stages ?? [];
+  if (existing.includes(stage)) return row;
+  row.stages = [...existing, stage];
+  return row;
+}
 
 // Convex combination weight for hybrid fusion. 0.5 = equal trust in
 // vector and lexical legs. We deliberately avoid pure rank-based RRF
@@ -47,14 +64,23 @@ export function fuse(
 
   if (mode === 'vector') {
     for (const r of vectorRows) {
-      merged.set(String(r.id), { ...r, fusedScore: normalizeVec(r.simScore ?? 0) });
+      merged.set(
+        String(r.id),
+        addStage({ ...r, fusedScore: normalizeVec(r.simScore ?? 0) }, 'hype'),
+      );
     }
     return [...merged.values()];
   }
 
   if (mode === 'lexical') {
     for (const r of lexicalRows) {
-      merged.set(String(r.id), { ...r, fusedScore: normalizeLex(r.bm25Score ?? 0) });
+      merged.set(
+        String(r.id),
+        addStage(
+          { ...r, fusedScore: normalizeLex(r.bm25Score ?? 0) },
+          'lexical',
+        ),
+      );
     }
     return [...merged.values()];
   }
@@ -62,10 +88,10 @@ export function fuse(
   // hybrid — convex w·vec + (1-w)·lex; one leg can be zero.
   const w = HYBRID_VECTOR_WEIGHT;
   for (const r of vectorRows) {
-    merged.set(String(r.id), {
-      ...r,
-      fusedScore: w * normalizeVec(r.simScore ?? 0),
-    });
+    merged.set(
+      String(r.id),
+      addStage({ ...r, fusedScore: w * normalizeVec(r.simScore ?? 0) }, 'hype'),
+    );
   }
   for (const r of lexicalRows) {
     const key = String(r.id);
@@ -73,11 +99,15 @@ export function fuse(
     if (prior) {
       prior.fusedScore += (1 - w) * normalizeLex(r.bm25Score ?? 0);
       prior.bm25Score = r.bm25Score;
+      addStage(prior, 'lexical');
     } else {
-      merged.set(key, {
-        ...r,
-        fusedScore: (1 - w) * normalizeLex(r.bm25Score ?? 0),
-      });
+      merged.set(
+        key,
+        addStage(
+          { ...r, fusedScore: (1 - w) * normalizeLex(r.bm25Score ?? 0) },
+          'lexical',
+        ),
+      );
     }
   }
   return [...merged.values()];
