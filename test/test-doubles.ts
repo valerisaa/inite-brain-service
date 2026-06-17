@@ -40,7 +40,7 @@ export class StubExtractor implements Pick<ExtractorService, 'extract'> {
     _companyId?: string,
   ): Promise<ExtractionResult> {
     if (this.script) return this.script;
-    if (!text.trim()) return { entities: [], facts: [] };
+    if (!text.trim()) return { entities: [], facts: [], edges: [] };
     return {
       entities: [{ name: text.trim().slice(0, 40), type: 'topic' }],
       facts: [
@@ -51,6 +51,7 @@ export class StubExtractor implements Pick<ExtractorService, 'extract'> {
           confidence: 0.6,
         },
       ],
+      edges: [],
     };
   }
 }

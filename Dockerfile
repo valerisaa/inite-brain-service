@@ -7,12 +7,10 @@ RUN corepack enable && pnpm install --frozen-lockfile --ignore-scripts
 
 COPY tsconfig.json nest-cli.json ./
 COPY src ./src
-# Admin scenario runner imports declarative eval data from test/eval/.
-# Code stays in src/; only the data files (types, scenarios, fixtures)
-# need to be present at build time — no Jest runtime is pulled in.
-COPY test/eval/types.ts ./test/eval/types.ts
-COPY test/eval/scenarios ./test/eval/scenarios
-COPY test/eval/fixtures ./test/eval/fixtures
+# Eval types/scenarios/fixtures used by the admin scenario runner now
+# live under src/eval (moved from test/eval to honour the
+# production-code-must-not-import-from-test/ rule). They get included
+# via COPY src ./src — no extra COPY needed.
 
 RUN pnpm build
 
