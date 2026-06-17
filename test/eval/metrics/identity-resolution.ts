@@ -1,4 +1,4 @@
-import type { IdentityMergeResult } from '../types';
+import type { IdentityMergeResult } from '../../../src/eval/types';
 
 /**
  * Identity-resolution metrics — pairwise precision / recall / F1 over

@@ -1,5 +1,5 @@
 import type { BrainClient } from '@inite/knowledge';
-import type { Scenario, SynthesizeOutcome } from '../types';
+import type { Scenario, SynthesizeOutcome } from '../../../src/eval/types';
 import {
   computeFaithfulness,
   type FaithfulnessSourceFact,
@@ -105,17 +105,17 @@ export class FaithfulnessChecker {
           score.faithfulness !== null &&
           process.env.FAITHFULNESS_DEBUG !== '0'
         ) {
-          // eslint-disable-next-line no-console
+           
           console.log(
             `[faithfulness-debug] ${scenario.id} q="${e.query}" score=${score.faithfulness.toFixed(2)} ` +
               `claims=${score.totalClaims} answer="${answer.slice(0, 200)}"`,
           );
-          // eslint-disable-next-line no-console
+           
           console.log(
             `[faithfulness-debug] sourceFacts: ${sourceFacts.map((f) => `[${f.factId.slice(-8)}] ${f.predicate}=${f.object.slice(0, 60)}`).join(' | ')}`,
           );
           for (const c of score.claims) {
-            // eslint-disable-next-line no-console
+             
             console.log(`[faithfulness-debug]   ${c.verdict.padEnd(14)} :: ${c.claim}`);
           }
         }
@@ -132,7 +132,7 @@ export class FaithfulnessChecker {
           passed,
           faithfulnessFloor: floor,
         });
-      } catch (err) {
+      } catch {
         outcomes.push({
           scenarioId: scenario.id,
           query: e.query,

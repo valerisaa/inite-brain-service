@@ -7,7 +7,7 @@ import type {
   ExtractionResult,
   IdentityMergeResult,
   Scenario,
-} from '../types';
+} from '../../../src/eval/types';
 
 /**
  * Applies a scenario's setup steps to brain via the SDK. Returns the
@@ -155,7 +155,7 @@ export class SetupApplier {
     const recall = expected.length === 0 ? 1 : matched / expected.length;
 
     if (process.env.DEBUG_EXTRACTION === '1') {
-      // eslint-disable-next-line no-console
+       
       console.log(
         `[extraction-debug] scenario=${scenarioId} expected=${JSON.stringify(expected)} ` +
           `observed=${JSON.stringify(observed)} entitiesExtracted=${out.extractedEntityIds.length} ` +

@@ -12,7 +12,7 @@ import OpenAI from 'openai';
 import { BrainClient } from '@inite/knowledge';
 import { spawnService, SpawnedService } from './spawn';
 import { loadOpenAiKey } from './spawn/openai-key-loader';
-import { allScenarios } from './eval/scenarios';
+import { allScenarios } from '../src/eval/scenarios';
 import { loadDirectoryJson } from './eval/loaders/json-directory.loader';
 import { buildQueryBankFromDirectory } from './eval/loaders/directory-query-bank';
 import {
@@ -26,7 +26,7 @@ import {
   MiaChecker,
   FaithfulnessChecker,
 } from './eval/runner';
-import type { Scenario } from './eval/types';
+import type { Scenario } from '../src/eval/types';
 
 describe('Quality eval (real OpenAI, multi-vertical scenarios)', () => {
   let svc: SpawnedService;
@@ -72,7 +72,7 @@ describe('Quality eval (real OpenAI, multi-vertical scenarios)', () => {
 
     const directoryScenarios = loadDirectoryScenarios();
     if (directoryScenarios.length > 0) {
-      // eslint-disable-next-line no-console
+       
       console.log(
         `[quality] augmenting with ${directoryScenarios.length} directory scenario(s) ` +
           `(${directoryScenarios.reduce((n, s) => n + s.queries.length, 0)} queries)`,
@@ -96,7 +96,7 @@ describe('Quality eval (real OpenAI, multi-vertical scenarios)', () => {
         resolve(reportOut),
         JSON.stringify(reporter.serialize(report), null, 2),
       );
-      // eslint-disable-next-line no-console
+       
       console.log(`[quality] wrote machine-readable report to ${reportOut}`);
     }
 
@@ -169,7 +169,7 @@ function loadDirectoryScenarios(): Scenario[] {
   for (const rel of paths) {
     const abs = resolve(rel);
     if (!existsSync(abs)) {
-      // eslint-disable-next-line no-console
+       
       console.warn(`[quality] directory fixture not found, skipping: ${abs}`);
       continue;
     }
@@ -184,7 +184,7 @@ function loadDirectoryScenarios(): Scenario[] {
       sampleEntities: sample,
       seed,
     });
-    // eslint-disable-next-line no-console
+     
     console.log(
       `[quality] directory '${rel}': ${bank.stats.entitiesSeeded} entities seeded, ` +
         `${bank.stats.entitiesSampled} sampled, ${bank.stats.queriesGenerated} queries generated`,

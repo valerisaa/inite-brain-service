@@ -1,4 +1,4 @@
-import type { QueryResult } from '../types';
+import type { QueryResult } from '../../../src/eval/types';
 
 /**
  * Recall@K — share of queries where the expected entity appears in top K

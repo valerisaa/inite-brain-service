@@ -6,17 +6,16 @@ import { FactsService } from '../facts/facts.service';
 import { EntitiesService } from '../entities/entities.service';
 import { SearchService, SearchHit } from '../search/search.service';
 import { SurrealService } from '../db/surreal.service';
-import { allScenarios } from '../../test/eval/scenarios';
+import { allScenarios } from '../eval/scenarios';
 import type {
   Scenario,
   SetupStep,
   SetupFactStep,
   SetupMentionStep,
-  SetupLinkStep,
   SetupRetractStep,
   SetupForgetStep,
   QueryExpectation,
-} from '../../test/eval/types';
+} from '../eval/types';
 
 export interface ScenarioListItem {
   id: string;

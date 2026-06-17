@@ -1,4 +1,4 @@
-import type { Scenario, EvalReport } from '../types';
+import type { Scenario, EvalReport } from '../../../src/eval/types';
 import { ScenarioRunner } from './scenario-runner';
 import { Aggregator } from './aggregator';
 

@@ -1,6 +1,6 @@
 import type { BrainClient } from '@inite/knowledge';
 import { MemoryAssertionsChecker } from './eval/runner/memory-assertions';
-import type { Scenario } from './eval/types';
+import type { Scenario } from '../src/eval/types';
 
 /**
  * Unit coverage for MemoryAssertionsChecker — exercises the decision

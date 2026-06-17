@@ -1,4 +1,4 @@
-import type { EvalReport, AggregateMetric } from '../types';
+import type { EvalReport, AggregateMetric } from '../../../src/eval/types';
 
 /**
  * Stable, machine-readable shape used for baseline-diff. Kept narrow on

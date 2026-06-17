@@ -1,4 +1,4 @@
-import type { QueryResult } from '../types';
+import type { QueryResult } from '../../../src/eval/types';
 
 /**
  * Normalised Discounted Cumulative Gain at rank K.

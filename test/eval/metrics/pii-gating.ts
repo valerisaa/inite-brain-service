@@ -1,4 +1,4 @@
-import type { QueryResult } from '../types';
+import type { QueryResult } from '../../../src/eval/types';
 
 /**
  * PII-gating correctness — share of absence-style queries (caller lacks

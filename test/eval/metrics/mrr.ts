@@ -1,4 +1,4 @@
-import type { QueryResult } from '../types';
+import type { QueryResult } from '../../../src/eval/types';
 
 /**
  * Mean Reciprocal Rank. For each query: 1/rank if expected found,

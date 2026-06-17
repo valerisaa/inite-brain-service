@@ -4,7 +4,7 @@ import type {
   SetupStep,
   QueryExpectation,
   MemoryAssertion,
-} from '../types';
+} from '../../../src/eval/types';
 
 /**
  * JSON directory schema — the wire shape an operator hands the

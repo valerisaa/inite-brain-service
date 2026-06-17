@@ -1,5 +1,5 @@
 import { ndcgAtK } from './eval/metrics/ndcg';
-import type { QueryResult } from './eval/types';
+import type { QueryResult } from '../src/eval/types';
 
 const q = (rank: number, temporal = false): QueryResult => ({
   query: 'q',

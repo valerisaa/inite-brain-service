@@ -1,4 +1,4 @@
-import type { MemoryAssertionResult } from '../types';
+import type { MemoryAssertionResult } from '../../../src/eval/types';
 
 /**
  * Fraction of memory-lifecycle assertions that passed across the

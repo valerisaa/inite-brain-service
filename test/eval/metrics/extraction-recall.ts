@@ -1,4 +1,4 @@
-import type { ExtractionResult } from '../types';
+import type { ExtractionResult } from '../../../src/eval/types';
 
 /**
  * Extraction predicate-recall — share of expected predicates that the

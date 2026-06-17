@@ -1,5 +1,5 @@
 import type { BrainClient } from '@inite/knowledge';
-import type { MemoryAssertion, MemoryAssertionResult, Scenario } from '../types';
+import type { MemoryAssertion, MemoryAssertionResult, Scenario } from '../../../src/eval/types';
 
 /**
  * MemoryAssertionsChecker — runs the lifecycle assertions declared on
@@ -194,12 +194,12 @@ export class MemoryAssertionsChecker {
       // an unfiltered superseded fact or from a setup-step that
       // never produced the retraction.
       if (process.env.DEBUG_MEMLC === '1') {
-        // eslint-disable-next-line no-console
+         
         console.log(
           `[memlc-debug] scenarioId=${scenarioId} description='${a.description}' query='${a.query}'`,
         );
         for (const f of matched.facts) {
-          // eslint-disable-next-line no-console
+           
           console.log(
             `  factId=${f.factId} predicate=${f.predicate} object='${f.object}' status=${f.status} validFrom=${f.validFrom} validUntil=${f.validUntil ?? '-'} score=${f.score}`,
           );

@@ -1,5 +1,5 @@
 import type { BrainClient } from '@inite/knowledge';
-import type { MiaTest, MiaTestResult, Scenario } from '../types';
+import type { MiaTest, MiaTestResult, Scenario } from '../../../src/eval/types';
 import { miaAuc } from '../metrics/mia-auc';
 
 /**

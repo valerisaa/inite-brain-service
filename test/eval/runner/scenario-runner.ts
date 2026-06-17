@@ -1,4 +1,4 @@
-import type { Scenario, ScenarioOutcome } from '../types';
+import type { Scenario, ScenarioOutcome } from '../../../src/eval/types';
 import { SetupApplier } from './setup-applier';
 import { QueryExecutor } from './query-executor';
 import { MemoryAssertionsChecker } from './memory-assertions';

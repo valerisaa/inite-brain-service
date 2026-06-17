@@ -1,5 +1,5 @@
 import type { BrainClient } from '@inite/knowledge';
-import type { QueryExpectation, QueryResult } from '../types';
+import type { QueryExpectation, QueryResult } from '../../../src/eval/types';
 
 /**
  * Executes a single query expectation against brain and produces a

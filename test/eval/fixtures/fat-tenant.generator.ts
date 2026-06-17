@@ -16,7 +16,7 @@
  *   hub-vs-leaf entity confusion, multi-hop graph traversal,
  *   bitemporal asOf on dense fact histories.
  */
-import type { Scenario, SetupStep } from '../types';
+import type { Scenario, SetupStep } from '../../../src/eval/types';
 
 const ISO = (d: string) => new Date(d).toISOString();
 

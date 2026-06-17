@@ -1,5 +1,5 @@
 import type { JsonDirectory, JsonDirectoryEntity } from './json-directory.loader';
-import type { QueryExpectation, Scenario } from '../types';
+import type { QueryExpectation, Scenario } from '../../../src/eval/types';
 
 /**
  * Generate retrieval queries from a JsonDirectory. The Wikidata

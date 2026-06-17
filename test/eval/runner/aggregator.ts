@@ -4,7 +4,7 @@ import type {
   ScenarioOutcome,
   Vertical,
   VerticalReport,
-} from '../types';
+} from '../../../src/eval/types';
 import {
   recallAtKVector,
   reciprocalRankVector,
