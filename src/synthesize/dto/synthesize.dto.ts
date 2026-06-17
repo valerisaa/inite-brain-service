@@ -48,4 +48,15 @@ export class SynthesizeDto extends SearchDto {
   @IsBoolean()
   @Type(() => Boolean)
   explain?: boolean;
+
+  /**
+   * Locale-pinning (Phase 4.C). Pins the generator's answer to a
+   * specific ISO 639-1 language. Citations remain in the language
+   * of the underlying fact (per the FINOS air-governance pattern:
+   * never silently translate a piece of evidence). When omitted the
+   * generator answers in the dominant language of the input query.
+   */
+  @IsOptional()
+  @IsString()
+  answerLang?: string;
 }

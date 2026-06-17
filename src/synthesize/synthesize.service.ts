@@ -12,6 +12,7 @@ import {
 } from './dto/synthesize.dto';
 import { buildDecisionLog, type DecisionLogEntry } from './decision-log';
 import { applyConformalGuardrail } from './conformal-guardrail';
+import { detectLanguage } from '../ai/locale/language-detector';
 
 export interface Citation {
   factId: string;
@@ -196,13 +197,19 @@ export class SynthesizeService {
       );
     }
 
+    // Phase 4.C — resolve the answer language. Explicit DTO wins;
+    // otherwise we detect from the query (so a Russian question gets
+    // a Russian answer by default without the caller having to opt in).
+    const answerLang =
+      dto.answerLang ?? detectAnswerLang(dto.query);
+
     let generated: GeneratorOutput;
     try {
       generated = await withSpan(
         'synthesize.generate',
         () =>
           this.limiter.run(() =>
-            this.callGenerator(dto.query, factLines, model),
+            this.callGenerator(dto.query, factLines, model, answerLang),
           ),
         { 'synthesize.facts': factIndex.size },
       );
@@ -338,12 +345,17 @@ export class SynthesizeService {
     query: string,
     factLines: string[],
     model: string,
+    answerLang: string | null,
   ): Promise<GeneratorOutput> {
-    const user = `Query: ${query}\n\nRetrieved facts:\n${factLines.join('\n')}`;
+    const langInstruction = answerLang
+      ? `\n\nLanguage policy: write your answer in ${answerLang} (ISO 639-1). Keep citation spans in their original language.`
+      : '';
+    const user = `Query: ${query}\n\nRetrieved facts:\n${factLines.join('\n')}${langInstruction}`;
     traceArtifact('synthesize.generator_prompt', {
       system: GENERATOR_SYSTEM,
       user,
       model,
+      answerLang,
     });
     const res = await this.openai.chat.completions.create({
       model,
@@ -504,6 +516,18 @@ function attachDecisionLog(
   decisionLog: DecisionLogEntry[] | undefined,
 ): SynthesizeResult {
   return decisionLog === undefined ? result : { ...result, decisionLog };
+}
+
+/**
+ * Detect the answer language from the user query. Wraps the pure
+ * detector and returns `null` when the detector is undecided so the
+ * caller can omit the language instruction from the prompt entirely
+ * (the generator's own multilingual default is correct enough for
+ * the `und` case).
+ */
+function detectAnswerLang(query: string): string | null {
+  const r = detectLanguage(query);
+  return r.language === 'und' ? null : r.language;
 }
 
 /**

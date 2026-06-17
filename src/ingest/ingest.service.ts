@@ -23,6 +23,7 @@ import {
   type ConflictExplanation,
   type ResolverConflictPayload,
 } from './conflict-explainer';
+import { detectLanguage } from '../ai/locale/language-detector';
 
 export type IngestOutcome =
   | 'INSERTED'
@@ -157,6 +158,26 @@ export class IngestService {
 
       const factId = result?.factId ? String(result.factId) : null;
       const outcome = result?.outcome as IngestOutcome;
+
+      // Phase 4.A locale tagging. Detect language + script on the
+      // object span (the "what is true about the entity" text) and
+      // persist alongside the fact. We tag on INSERTED only — for
+      // SUPERSEDED/COMPETING the new fact is already in `factId`
+      // and the previous tag, if any, stays valid for the loser row.
+      if (factId && outcome === 'INSERTED') {
+        const detected = detectLanguage(objectStr);
+        if (detected.language !== 'und') {
+          await db.query(
+            `UPDATE type::thing('knowledge_fact', $tail)
+                SET lang = $lang, script = $script`,
+            {
+              tail: idTailOf(factId),
+              lang: detected.language,
+              script: detected.script,
+            },
+          );
+        }
+      }
 
       // HyPE: generate a hypothetical-question embedding and write
       // it onto the new fact. We do this synchronously inside the
