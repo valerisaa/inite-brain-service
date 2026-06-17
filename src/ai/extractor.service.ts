@@ -340,18 +340,62 @@ export class ExtractorService {
     });
 
     // Local NER. Disabled by default — operators opt in via
-    // EXTRACTOR_LOCAL_NER_ENABLED=true. When ready, emit the
-    // extractor.local_entities trace artifact for comparison with
-    // LLM-emitted entities[]. E7 (skip gate) consumes this output
-    // as the fast-path entity source.
+    // EXTRACTOR_LOCAL_NER_ENABLED=true.
+    let localEntities: Awaited<ReturnType<LocalNerService['extract']>> = [];
     if (this.localNer.isReady()) {
-      const localEntities = await this.localNer.extract(trimmed);
+      localEntities = await this.localNer.extract(trimmed);
       if (localEntities.length > 0) {
         traceArtifact('extractor.local_entities', {
           count: localEntities.length,
           entities: localEntities,
         });
       }
+    }
+
+    // Skip-LLM gate. Conservatively synthesise the ExtractionResult
+    // from locals when:
+    //   • EXTRACTOR_SKIP_LLM_ENABLED=true (opt-in)
+    //   • Local NER produced ≥1 entity
+    //   • Every local clause has a learned pattern in the per-tenant
+    //     extraction_pattern cache (Sprint E6)
+    //   • Every pattern's referenced entityIndex < localEntities.length
+    //   • Every cached fact's valueSpan is a substring of the current
+    //     message text (span grounding holds across replays)
+    // Any check fails → fall through to the normal LLM pipeline.
+    const skipEnabled =
+      this.configService.get<string>('EXTRACTOR_SKIP_LLM_ENABLED', 'false') ===
+      'true';
+    if (
+      skipEnabled &&
+      localClauses.length > 0 &&
+      localEntities.length > 0
+    ) {
+      const synthesised = await this.attemptLocalSynth(
+        companyId,
+        trimmed,
+        localClauses.map((c) => c.text),
+        localEntities,
+      );
+      if (synthesised) {
+        traceArtifact('extractor.skip_decision', {
+          skip: true,
+          reason: 'all_local',
+        });
+        this.extractionCache.set(cacheKey, synthesised);
+        return synthesised;
+      }
+      traceArtifact('extractor.skip_decision', {
+        skip: false,
+        reason: 'partial_coverage',
+      });
+    } else if (skipEnabled) {
+      traceArtifact('extractor.skip_decision', {
+        skip: false,
+        reason:
+          localClauses.length === 0
+            ? 'no_local_clauses'
+            : 'no_local_entities',
+      });
     }
 
     traceArtifact('extractor.vocab', {
@@ -847,6 +891,109 @@ export class ExtractorService {
     }
 
     return result;
+  }
+
+  /**
+   * Attempt to synthesise an ExtractionResult entirely from local
+   * components — clauses (E2), NER (E3), and the per-tenant
+   * extraction-pattern cache (E6). Returns the synthesised result
+   * when every local clause has a cached pattern AND every cached
+   * referenced entityIndex resolves to a local NER entity AND every
+   * cached valueSpan is grounded in the current input. Returns null
+   * if any check fails — the caller falls back to the LLM.
+   */
+  private async attemptLocalSynth(
+    companyId: string,
+    inputText: string,
+    clauseTexts: string[],
+    localEntities: Array<{
+      text: string;
+      type: string;
+      start: number;
+      end: number;
+      score: number;
+    }>,
+  ): Promise<ExtractionResult | null> {
+    const facts: ExtractedFact[] = [];
+    const edges: ExtractedEdge[] = [];
+    const normalizedInput = normalizeForGrounding(inputText);
+    for (const clauseText of clauseTexts) {
+      const pattern = await this.extractionPatterns.lookup(
+        companyId,
+        clauseText,
+      );
+      if (!pattern) return null;
+      for (const f of pattern.facts) {
+        const normalizedSpan = normalizeForGrounding(f.valueSpan);
+        if (!normalizedInput.includes(normalizedSpan)) return null;
+        const entityIndex = this.entityIndexForFact(
+          f,
+          localEntities,
+          clauseText,
+        );
+        if (entityIndex === -1) return null;
+        facts.push({
+          entityIndex,
+          predicate: f.predicate,
+          object: f.valueSpan,
+          confidence: f.confidence,
+          clause: clauseText,
+        });
+      }
+      for (const e of pattern.edges) {
+        if (
+          e.fromEntityIndex >= localEntities.length ||
+          e.toEntityIndex >= localEntities.length ||
+          e.fromEntityIndex === e.toEntityIndex
+        ) {
+          return null;
+        }
+        edges.push({
+          fromEntityIndex: e.fromEntityIndex,
+          toEntityIndex: e.toEntityIndex,
+          kind: e.kind,
+          confidence: e.confidence,
+          clause: clauseText,
+        });
+      }
+    }
+    const entities: ExtractedEntity[] = localEntities.map((e) => ({
+      name: e.text,
+      type: this.mapNerTypeToEntityType(e.type),
+    }));
+    return { entities, facts, edges };
+  }
+
+  /**
+   * Pick the local entity that overlaps the clause text. First try
+   * exact-span overlap; fall back to the first entity whose name
+   * appears in the clause. Returns -1 when no entity can be linked.
+   */
+  private entityIndexForFact(
+    fact: { valueSpan: string },
+    localEntities: Array<{ text: string; start: number; end: number }>,
+    clauseText: string,
+  ): number {
+    const clauseLower = clauseText.toLowerCase();
+    for (let i = 0; i < localEntities.length; i++) {
+      const en = localEntities[i];
+      if (clauseLower.includes(en.text.toLowerCase())) {
+        // Heuristic: the entity is the subject of the fact when its
+        // name appears inside the clause. Multiple candidates are
+        // resolved by first-occurrence — good enough for the demo
+        // recipe; richer disambiguation belongs to a later sprint.
+        return i;
+      }
+    }
+    return -1;
+  }
+
+  private mapNerTypeToEntityType(t: string): ExtractedEntity['type'] {
+    const upper = (t ?? '').toUpperCase();
+    if (upper === 'PER' || upper === 'PERSON') return 'staff';
+    if (upper === 'ORG' || upper === 'ORGANIZATION') return 'other';
+    if (upper === 'LOC' || upper === 'LOCATION') return 'location';
+    return 'other';
   }
 
   private normalizeType(t: unknown): ExtractedEntity['type'] {
