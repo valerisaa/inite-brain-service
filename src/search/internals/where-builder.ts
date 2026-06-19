@@ -10,11 +10,23 @@ import type { SearchDto } from '../dto/search.dto';
  * Pure function — no DB, no embedder, no policy lookup. All inputs
  * flow in via the dto + flags; outputs are SQL + bound params.
  */
+export interface BaseWhereOptions {
+  /**
+   * Phase 4.B locale-aware retrieval. When supplied (and not
+   * disabled via the dto), the WHERE clause restricts to facts
+   * whose `lang` is either the supplied code or NONE (pre-Phase-4
+   * facts that haven't been backfilled — keeping them visible
+   * avoids regressing recall while the corpus catches up).
+   */
+  langFilter?: string;
+}
+
 export function buildBaseWhere(
   dto: SearchDto,
   asOf: Date | null,
   includeRetracted: boolean,
   includeContested: boolean,
+  opts: BaseWhereOptions = {},
 ): { sql: string; params: Record<string, unknown> } {
   const clauses: string[] = [];
   const params: Record<string, unknown> = {};
@@ -40,6 +52,14 @@ export function buildBaseWhere(
         : raw;
       return new StringRecordId(`knowledge_entity:${id}`);
     });
+  }
+  if (opts.langFilter && !dto.disableLangFilter) {
+    // Pre-Phase-4 facts have lang IS NONE — keep them visible so
+    // back-filling the corpus is a soft migration, not a recall
+    // cliff. Recall-critical callers can disable via
+    // `disableLangFilter: true`.
+    clauses.push(`AND (lang = $langFilter OR lang IS NONE)`);
+    params.langFilter = opts.langFilter;
   }
 
   // ── Bitemporal "actual now" default ────────────────────────────

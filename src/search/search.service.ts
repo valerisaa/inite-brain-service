@@ -6,6 +6,7 @@ import { RerankerService } from '../ai/reranker.service';
 import { PredicateRouterService } from '../ai/predicate-router.service';
 import { CrossEncoderService } from '../ai/cross-encoder.service';
 import { CalibrationService } from '../ai/calibration/calibration.service';
+import { detectLanguage } from '../ai/locale/language-detector';
 import { SearchDto, SearchMode } from './dto/search.dto';
 import { MetricsService } from '../metrics/metrics.service';
 import { withSpan } from '../common/tracing';
@@ -85,6 +86,20 @@ export class SearchService {
     marginThreshold: number,
   ): boolean {
     return shouldSkipRerankByMargin(candidates, marginThreshold);
+  }
+
+  /**
+   * Resolve the lang code to push into the WHERE builder. Honour an
+   * explicit dto.queryLang first; otherwise run the pure detector on
+   * the query text. Returns undefined when detection is `und` or the
+   * caller opted out via dto.disableLangFilter, so callers downstream
+   * fall back to the single-pass behaviour.
+   */
+  private resolveLangFilter(dto: SearchDto): string | undefined {
+    if (dto.disableLangFilter) return undefined;
+    if (dto.queryLang) return dto.queryLang;
+    const detected = detectLanguage(dto.query);
+    return detected.language === 'und' ? undefined : detected.language;
   }
 
   /**
@@ -215,21 +230,52 @@ export class SearchService {
     db: Surreal,
     ctx: PipelineContext,
   ): Promise<{ results: SearchHit[] }> {
+    // Phase 4.B locale-aware retrieval. Detect the query language
+    // (or honour the explicit dto.queryLang) and apply a two-pass
+    // filter → cross-lingual backoff strategy. `und` or disabled →
+    // single-pass exactly as before.
+    const langFilter = this.resolveLangFilter(ctx.dto);
     const baseWhere = buildBaseWhere(
       ctx.dto,
       ctx.asOf,
       ctx.includeRetracted,
       ctx.includeContested,
+      { langFilter },
     );
     traceArtifact('search.query', {
       query: ctx.dto.query,
       mode: ctx.mode,
       candidateK: ctx.candidateK,
       asOf: ctx.dto.asOf,
+      langFilter,
     });
 
-    // 1. Retrieval legs (parallel) + fusion.
+    // 1. Retrieval legs (parallel) + fusion. With a langFilter on,
+    //    a thin first pass may yield too few hits — fall back to a
+    //    second pass without the filter so cross-lingual paraphrases
+    //    surface (BGE-M3-style backoff path).
     const fused = await this.runRetrievalStage(db, ctx, baseWhere);
+    if (langFilter && fused.length < ctx.candidateK / 2) {
+      const fallbackWhere = buildBaseWhere(
+        ctx.dto,
+        ctx.asOf,
+        ctx.includeRetracted,
+        ctx.includeContested,
+      );
+      const fallback = await this.runRetrievalStage(db, ctx, fallbackWhere);
+      const seen = new Set(fused.map((r) => String(r.id)));
+      for (const r of fallback) {
+        if (!seen.has(String(r.id))) {
+          fused.push(r);
+          seen.add(String(r.id));
+        }
+      }
+      traceArtifact('search.langfilter_backoff', {
+        firstPass: fused.length - fallback.length,
+        fallback: fallback.length,
+        langFilter,
+      });
+    }
 
     // 2. Identity-merge re-attribution + scope-policy filter.
     const survivorRecords = await hydrateSurvivors(db, fused);

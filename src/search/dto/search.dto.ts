@@ -126,4 +126,29 @@ export class SearchDto {
    */
   @IsOptional() @IsIn(['full', 'compact', 'ids'])
   outputShape?: 'full' | 'compact' | 'ids';
+
+  /**
+   * Phase 4.B locale-aware retrieval. ISO 639-1 hint for the query
+   * language. When supplied (or detected from the query), the
+   * search runs a TWO-PASS strategy:
+   *   1. lang-filtered pass — restrict to facts where
+   *      `lang = queryLang OR lang IS NONE`
+   *   2. cross-lingual backoff — if the filtered pass returns fewer
+   *      than `limit` hits, second pass relaxes the lang filter so
+   *      semantically-matching facts in other languages still
+   *      surface (BGE-M3-style cross-lingual recall path).
+   *
+   * Omitting `queryLang` falls back to the existing single-pass
+   * behaviour — back-compat preserved.
+   */
+  @IsOptional() @IsString()
+  queryLang?: string;
+
+  /**
+   * Disable the language-aware retrieval pass entirely (debug
+   * escape hatch). When true, the where-builder skips the lang
+   * filter even if `queryLang` was supplied or detected.
+   */
+  @IsOptional() @IsBoolean()
+  disableLangFilter?: boolean;
 }
