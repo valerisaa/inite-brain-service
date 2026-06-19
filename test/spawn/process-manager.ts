@@ -11,7 +11,7 @@ export class ProcessManager {
 
   start(env: NodeJS.ProcessEnv): ChildProcess {
     const repoRoot = join(__dirname, '..', '..');
-    this.proc = spawn('node', [join(repoRoot, 'dist', 'src', 'main.js')], {
+    this.proc = spawn('node', [join(repoRoot, 'dist', 'main.js')], {
       cwd: repoRoot,
       env,
       stdio: ['ignore', 'pipe', 'pipe'],

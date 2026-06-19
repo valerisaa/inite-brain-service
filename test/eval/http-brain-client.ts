@@ -54,10 +54,19 @@ export interface EvalSearchResponse {
   results: EvalSearchHit[];
 }
 
+export interface EvalCitation {
+  factId: string;
+  entityId: string;
+  canonicalName: string;
+  predicate: string;
+  object: string;
+  [k: string]: unknown;
+}
+
 export interface EvalSynthesizeResponse {
   answer: string | null;
   reason?: string;
-  citations: Array<{ factId: string; [k: string]: unknown }>;
+  citations: EvalCitation[];
   results: EvalSearchHit[];
   [k: string]: unknown;
 }
@@ -65,6 +74,17 @@ export interface EvalSynthesizeResponse {
 export interface EvalIngestResult {
   factId: string | null;
   outcome: string;
+  [k: string]: unknown;
+}
+
+/**
+ * /v1/ingest/mention response shape used by the eval runner. The
+ * production controller surfaces extractedEntityIds / extractedFactIds
+ * arrays which the runner indexes into for extraction-recall scoring.
+ */
+export interface EvalMentionResult {
+  extractedEntityIds: string[];
+  extractedFactIds: string[];
   [k: string]: unknown;
 }
 
@@ -100,11 +120,7 @@ export class HttpBrainClient {
       link: (body: unknown) =>
         this.call<{ [k: string]: unknown }>('POST', '/v1/ingest/link', body),
       mention: (body: unknown) =>
-        this.call<{ [k: string]: unknown }>(
-          'POST',
-          '/v1/ingest/mention',
-          body,
-        ),
+        this.call<EvalMentionResult>('POST', '/v1/ingest/mention', body),
     };
     this.facts = {
       retract: (factId: string, body: unknown) =>
@@ -136,7 +152,7 @@ export class HttpBrainClient {
 interface IngestSurface {
   fact(body: unknown): Promise<EvalIngestResult>;
   link(body: unknown): Promise<{ [k: string]: unknown }>;
-  mention(body: unknown): Promise<{ [k: string]: unknown }>;
+  mention(body: unknown): Promise<EvalMentionResult>;
 }
 
 interface FactsSurface {

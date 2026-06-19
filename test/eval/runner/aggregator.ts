@@ -196,7 +196,7 @@ export class Aggregator {
 }
 
 /** Maximum AUC across MIA tests, or null when there are none. */
-function maxMiaAuc(results: import('../types').MiaTestResult[]): number | null {
+function maxMiaAuc(results: import('../../../src/eval/types').MiaTestResult[]): number | null {
   if (results.length === 0) return null;
   let max = 0;
   for (const r of results) if (r.auc > max) max = r.auc;
@@ -209,7 +209,7 @@ function maxMiaAuc(results: import('../types').MiaTestResult[]): number | null {
  * with no threshold (so an F1 dip doesn't double-fire at the gate).
  */
 function identityMergeMetrics(
-  merges: import('../types').IdentityMergeResult[],
+  merges: import('../../../src/eval/types').IdentityMergeResult[],
 ): AggregateMetric[] {
   const m = identityResolutionMetrics(merges);
   return [
