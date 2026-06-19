@@ -20,6 +20,7 @@ import { ChatRouterCacheService } from './chat-router-cache.service';
 import { CollapsePatternService } from './collapse-pattern.service';
 import { IntentClassifierService } from './intent-classifier.service';
 import { EmbedderService } from '../ai/embedder.service';
+import { ReindexEmbeddingsService } from '../ai/embedder/reindex-embeddings.service';
 import { DEMO_LIVE_COMPANY } from './admin-demo.controller';
 
 /**
@@ -47,6 +48,7 @@ export class AdminController {
     private readonly collapsePatterns: CollapsePatternService,
     private readonly intentClassifier: IntentClassifierService,
     private readonly embedder: EmbedderService,
+    private readonly reindex: ReindexEmbeddingsService,
   ) {}
 
   @Get('overview')
@@ -104,6 +106,37 @@ export class AdminController {
    * This is the safe-by-default rule — operator can never accidentally
    * drop a real `co_<companyId>` database through this surface.
    */
+  /**
+   * Re-embed existing knowledge_fact rows with the active
+   * EmbedderService provider. Operator-triggered after flipping
+   * `EMBEDDER_PROVIDER=bge-m3` so historical facts (still carrying
+   * the OpenAI vector) move into the new vector space.
+   *
+   *   POST /v1/admin/reindex/embeddings?dryRun=true
+   *
+   * Query params:
+   *   tenant   — limit to a single companyId (default: every known)
+   *   dryRun   — when "true" count rows but write nothing
+   *   maxFacts — hard cap on facts processed across all tenants
+   */
+  @Post('reindex/embeddings')
+  @RequireScopes('brain:admin')
+  async reindexEmbeddings(
+    @Query('tenant') tenant?: string,
+    @Query('dryRun') dryRun?: string,
+    @Query('maxFacts') maxFacts?: string,
+  ) {
+    const parsedMaxFacts = maxFacts ? parseInt(maxFacts, 10) : undefined;
+    return this.reindex.run({
+      tenant: tenant?.trim() || undefined,
+      dryRun: dryRun === 'true',
+      maxFacts:
+        parsedMaxFacts !== undefined && Number.isFinite(parsedMaxFacts)
+          ? parsedMaxFacts
+          : undefined,
+    });
+  }
+
   @Delete('tenants/:companyId')
   @RequireScopes('brain:admin')
   async dropTenant(@Param('companyId') companyId: string) {
