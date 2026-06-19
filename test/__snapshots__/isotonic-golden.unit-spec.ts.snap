@@ -1,0 +1,66 @@
+// Jest Snapshot v1, https://goo.gl/fbAQLP
+
+exports[`BOOTSTRAP_GOLD_SET — golden isotonic fit matches the snapshotted (thresholds, values, sampleCount) tuple 1`] = `
+{
+  "sampleCount": 200,
+  "thresholds": [
+    0.1,
+    0.2,
+    0.3,
+    0.5,
+    0.6,
+    0.7,
+    0.8,
+    0.9,
+    1,
+  ],
+  "values": [
+    0.05,
+    0.2,
+    0.3,
+    0.375,
+    0.45,
+    0.55,
+    0.55,
+    0.65,
+    0.7,
+  ],
+}
+`;
+
+exports[`BOOTSTRAP_GOLD_SET — golden isotonic fit produces stable calibrated values at probe points 1`] = `
+[
+  {
+    "calibrated": 0.05,
+    "raw": 0,
+  },
+  {
+    "calibrated": 0.05,
+    "raw": 0.05,
+  },
+  {
+    "calibrated": 0.3,
+    "raw": 0.25,
+  },
+  {
+    "calibrated": 0.375,
+    "raw": 0.5,
+  },
+  {
+    "calibrated": 0.55,
+    "raw": 0.75,
+  },
+  {
+    "calibrated": 0.65,
+    "raw": 0.85,
+  },
+  {
+    "calibrated": 0.7,
+    "raw": 0.95,
+  },
+  {
+    "calibrated": 0.7,
+    "raw": 1,
+  },
+]
+`;

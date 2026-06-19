@@ -13,6 +13,7 @@ import { graphTraversalScenarios } from './graph-traversal.scenarios';
 import { memoryLifecycleScenarios } from './memory-lifecycle.scenarios';
 import { contentScenarios } from './content.scenarios';
 import { demoTalkScenarios } from './demo-talk.scenarios';
+import { multilingualScenarios } from './multilingual.scenarios';
 
 export const allScenarios: Scenario[] = [
   ...demoTalkScenarios,
@@ -29,6 +30,7 @@ export const allScenarios: Scenario[] = [
   ...graphTraversalScenarios,
   ...memoryLifecycleScenarios,
   ...contentScenarios,
+  ...multilingualScenarios,
 ];
 
 export {
@@ -46,4 +48,5 @@ export {
   graphTraversalScenarios,
   memoryLifecycleScenarios,
   contentScenarios,
+  multilingualScenarios,
 };

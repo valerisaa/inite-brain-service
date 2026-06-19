@@ -1,6 +1,8 @@
 import { createHash } from 'node:crypto';
+import type { INestApplication } from '@nestjs/common';
 import type { EmbedderService } from '../src/ai/embedder.service';
 import type { ExtractorService, ExtractionResult } from '../src/ai/extractor.service';
+import { SynthesizeService } from '../src/synthesize/synthesize.service';
 
 /**
  * Deterministic embedder stub for e2e tests. Same text → same vector;
@@ -54,6 +56,58 @@ export class StubExtractor implements Pick<ExtractorService, 'extract'> {
       edges: [],
     };
   }
+}
+
+/**
+ * Tracking record for `mockSynthesizeOpenAi` — exposes the prompts
+ * the SynthesizeService sent into the (mocked) generator + verifier,
+ * so e2e tests can assert that, e.g., the Phase 4.C answerLang
+ * instruction made it into the user message.
+ */
+export interface OpenAiMockState {
+  calls: Array<{
+    system: string;
+    user: string;
+    response: string;
+  }>;
+}
+
+/**
+ * Replace the OpenAI client on the running SynthesizeService with a
+ * scripted stub. Each call drains one response from `responses`; the
+ * last response is repeated indefinitely once the queue is empty (the
+ * synthesize flow may emit verifier prompts after the generator).
+ *
+ * Returns the mock state so the caller can introspect captured
+ * messages after `/v1/synthesize` returns.
+ */
+export function mockSynthesizeOpenAi(
+  app: INestApplication,
+  responses: string[],
+): OpenAiMockState {
+  const state: OpenAiMockState = { calls: [] };
+  const svc = app.get(SynthesizeService);
+  const stub = {
+    chat: {
+      completions: {
+        create: async (req: {
+          messages: Array<{ role: string; content: string }>;
+        }) => {
+          const system =
+            req.messages.find((m) => m.role === 'system')?.content ?? '';
+          const user =
+            req.messages.find((m) => m.role === 'user')?.content ?? '';
+          const idx = state.calls.length;
+          const content =
+            responses[idx] ?? responses[responses.length - 1] ?? '{}';
+          state.calls.push({ system, user, response: content });
+          return { choices: [{ message: { content } }] };
+        },
+      },
+    },
+  };
+  (svc as unknown as { openai: typeof stub }).openai = stub;
+  return state;
 }
 
 function hashToVector(text: string, dim: number): number[] {
