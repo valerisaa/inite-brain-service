@@ -9,7 +9,7 @@
 import { resolve } from 'node:path';
 import { existsSync, readFileSync } from 'node:fs';
 import OpenAI from 'openai';
-import { BrainClient } from '@inite/knowledge';
+import { HttpBrainClient } from './eval/http-brain-client';
 import { spawnService, SpawnedService } from './spawn';
 import { loadOpenAiKey } from './spawn/openai-key-loader';
 import { allScenarios } from '../src/eval/scenarios';
@@ -50,9 +50,14 @@ describe('Quality eval (real OpenAI, multi-vertical scenarios)', () => {
     // verifier, often a retry on rate limit). 60s was tripping under
     // the larger query set (~250 retrieval queries + 3 synthesize +
     // their decompose/verify legs). Per-request budget, not total run.
-    const sdkOpts = { baseUrl: svc.baseUrl, timeoutMs: 180_000 };
-    const fullClient = new BrainClient({ ...sdkOpts, apiKey: svc.primary.plaintext });
-    const limitedClient = new BrainClient({ ...sdkOpts, apiKey: svc.extras[0].plaintext });
+    const fullClient = new HttpBrainClient({
+      baseUrl: svc.baseUrl,
+      apiKey: svc.primary.plaintext,
+    });
+    const limitedClient = new HttpBrainClient({
+      baseUrl: svc.baseUrl,
+      apiKey: svc.extras[0].plaintext,
+    });
 
     // Faithfulness verifier needs its own OpenAI client — runs in the
     // test process (the metric file lives outside Nest's container so

@@ -1,4 +1,4 @@
-import type { BrainClient } from '@inite/knowledge';
+import type { HttpBrainClient as BrainClient } from './eval/http-brain-client';
 import { MemoryAssertionsChecker } from './eval/runner/memory-assertions';
 import type { Scenario } from '../src/eval/types';
 

@@ -103,6 +103,12 @@ jobs:
   quality-eval:
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    # Workflow_dispatch always honours the run_eval input. The auto-on-
+    # main branch runs only when OPENAI_API_KEY is configured (org
+    # secret) — without the key the eval has nothing to score, so a
+    # missing secret is "skip", not "fail". Repository policy attaches
+    # OPENAI_API_KEY to the production deploy env; PRs from forks have
+    # no access regardless.
     if: |
       (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
       (github.event_name == 'workflow_dispatch' && github.event.inputs.run_eval == 'true')
@@ -111,19 +117,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Checkout inside the workspace (actions/checkout refuses paths
-      # outside GITHUB_WORKSPACE since v3). Then symlink to ../inite-shared
-      # so tsconfig.json's "@inite/knowledge" path alias resolves at compile
-      # and test time without changing source.
-      - name: Checkout inite-shared (sibling for SDK source)
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ github.repository_owner }}/inite-shared
-          path: inite-shared-checkout
-          token: ${{ secrets.INITE_SHARED_PAT || github.token }}
-
-      - name: Symlink inite-shared as sibling
-        run: ln -sf "$GITHUB_WORKSPACE/inite-shared-checkout" "$GITHUB_WORKSPACE/../inite-shared"
+      # NOTE: the old workflow checked out a sibling `inite-shared`
+      # repo here to resolve the `@inite/knowledge` tsconfig alias. The
+      # eval doesn't need that SDK — it speaks HTTP directly to the
+      # spawned brain process via test/eval/http-brain-client.ts. We
+      # deliberately stay self-contained so quality-eval doesn't
+      # depend on cross-repo PAT secrets.
 
       - uses: pnpm/action-setup@v4
         with:
