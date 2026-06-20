@@ -137,14 +137,22 @@ jobs:
       # writes a fresh entry (without overwriting the prior one),
       # and the restoreKeys prefix matches any earlier entry for the
       # delta-gate to find.
+      #
+      # Namespace bump: `v5-openai-` prefix invalidates the prior
+      # baseline epoch taken under openai SDK v4 (node-fetch keep-alive
+      # path). v5 (undici) shifts a few LLM-extraction recall numbers
+      # ±5-15pp run-to-run within absolute thresholds; comparing them
+      # to a v4 snapshot produced false-positive regressions in CI.
+      # Bumping the namespace forces the first green main run on v5
+      # to seed a fresh baseline. Bump again on the next SDK epoch.
       - name: Restore eval baseline
         id: baseline-cache
         uses: actions/cache@v4
         with:
           path: .eval-baseline/main.json
-          key: eval-baseline-main-${{ github.run_id }}
+          key: eval-baseline-main-v5-openai-${{ github.run_id }}
           restore-keys: |
-            eval-baseline-main-
+            eval-baseline-main-v5-openai-
 
       - name: Quality eval (multi-vertical, real OpenAI)
         env:
