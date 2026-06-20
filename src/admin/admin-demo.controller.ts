@@ -2,15 +2,18 @@ import {
   BadRequestException,
   Body,
   Controller,
+  ForbiddenException,
   Get,
   HttpException,
   Logger,
   Post,
+  Req,
   ServiceUnavailableException,
   UseGuards,
 } from '@nestjs/common';
 import { Throttle } from '@nestjs/throttler';
 import { ApiKeyGuard, RequireScopes } from '../auth/api-key.guard';
+import type { AuthenticatedRequest, BrainScope } from '../auth/api-key.types';
 import {
   runWithDebugTrace,
   traceArtifact,
@@ -24,13 +27,50 @@ import { ChatRouterService, ChatRoute } from './chat-router.service';
 import { policyFor } from '../ingest/conflict-resolver';
 
 /**
- * Shared tenant for the live demo slide. Single shared key so any admin
- * walking up to the deck sees the same accumulated state — the demo is
- * meant to be a sandbox an operator can wipe at will via the reset
- * endpoint. Per-user demo tenants would require a session store; not
- * worth it for a stage demo.
+ * Default demo tenant — used when the admin overview / router-stats
+ * code paths in admin.controller.ts ask for the demo tenant id but
+ * don't have an authenticated request handy. Per-caller demo tenants
+ * are derived from the bearer at request time via demoTenantFor()
+ * inside the controller, so two admins on different parent companies
+ * no longer share the same accumulated demo state.
  */
 export const DEMO_LIVE_COMPANY = 'demo_live';
+
+/**
+ * Demo state is scoped to the caller's owning tenant so two admins
+ * from different companies don't see + reset each other's
+ * accumulated facts. The pattern `demo_${parentCompanyId}` is the
+ * convention; falls back to the legacy shared tenant when the
+ * request has no auth (defensive — should not happen since the
+ * controller is brain:admin-gated).
+ */
+function demoTenantFor(req: AuthenticatedRequest | undefined): string {
+  const parent = req?.brainAuth?.companyId;
+  if (!parent) return DEMO_LIVE_COMPANY;
+  return `demo_${parent}`;
+}
+
+/**
+ * PII scope verification for the `includePii: true` body field on
+ * /demo/search and /demo/chat. Pre-fix the controller granted itself
+ * `brain:read_pii` based on the caller-supplied body flag alone — a
+ * brain:admin token without read_pii could thus elevate. Now we
+ * insist the caller already holds read_pii; otherwise we 403 instead
+ * of silently downgrading.
+ */
+function assertPiiScope(
+  req: AuthenticatedRequest,
+  wantsPii: boolean | undefined,
+): readonly BrainScope[] {
+  if (!wantsPii) return ['brain:read'];
+  const callerScopes = req.brainAuth?.scopes ?? [];
+  if (!callerScopes.includes('brain:read_pii')) {
+    throw new ForbiddenException(
+      `includePii=true requires brain:read_pii scope`,
+    );
+  }
+  return ['brain:read', 'brain:read_pii'];
+}
 
 /**
  * Live-demo sandbox endpoints (companyId=demo_live). Unlike the
@@ -59,12 +99,16 @@ export class AdminDemoController {
   @RequireScopes('brain:admin')
   // Runs the LLM extractor end-to-end on demo state; cap aggressively.
   @Throttle({ expensive: { limit: 10, ttl: 60_000 } })
-  async ingestMention(@Body() body: { text: string; vertical?: string }) {
+  async ingestMention(
+    @Req() req: AuthenticatedRequest,
+    @Body() body: { text: string; vertical?: string },
+  ) {
     if (!body?.text?.trim()) {
       throw new BadRequestException('text is required');
     }
+    const tenant = demoTenantFor(req);
     const captured = await runWithDebugTrace(() =>
-      this.ingest.ingestMention(DEMO_LIVE_COMPANY, {
+      this.ingest.ingestMention(tenant, {
         text: body.text,
         contextRef: { vertical: body.vertical ?? 'shop' },
         emittedAt: new Date().toISOString(),
@@ -84,6 +128,7 @@ export class AdminDemoController {
   @Post('search')
   @RequireScopes('brain:admin')
   async demoSearch(
+    @Req() req: AuthenticatedRequest,
     @Body()
     body: {
       query: string;
@@ -95,12 +140,11 @@ export class AdminDemoController {
     if (!body?.query?.trim()) {
       throw new BadRequestException('query is required');
     }
-    const scopes = body.includePii
-      ? ['brain:read', 'brain:read_pii']
-      : ['brain:read'];
+    const tenant = demoTenantFor(req);
+    const scopes = assertPiiScope(req, body.includePii);
     const captured = await runWithDebugTrace(() =>
       this.search.search(
-        DEMO_LIVE_COMPANY,
+        tenant,
         {
           query: body.query,
           limit: body.limit ?? 5,
@@ -133,6 +177,7 @@ export class AdminDemoController {
   // Router-LLM + extractor (tell) OR router-LLM + synthesize (ask).
   @Throttle({ expensive: { limit: 10, ttl: 60_000 } })
   async demoChat(
+    @Req() req: AuthenticatedRequest,
     @Body()
     body: {
       message: string;
@@ -142,17 +187,21 @@ export class AdminDemoController {
     if (!body?.message?.trim()) {
       throw new BadRequestException('message is required');
     }
+    const tenant = demoTenantFor(req);
+    // PII gate runs here so a missing read_pii scope 403s before any
+    // LLM call burns tokens / leaves a tenant in a partial state.
+    const askScopes = assertPiiScope(req, body.includePii);
     try {
       const captured = await runWithDebugTrace(async () => {
-        const knownNames = await this.fetchKnownEntityNames();
+        const knownNames = await this.fetchKnownEntityNames(tenant);
         const route: ChatRoute = await this.chatRouter.route(body.message, {
           knownNames,
-          companyId: DEMO_LIVE_COMPANY,
+          companyId: tenant,
         });
         if (route.intent === 'tell') {
-          return this.runTellChat(route);
+          return this.runTellChat(route, tenant);
         }
-        return this.runAskChat(route, body);
+        return this.runAskChat(route, body, tenant, askScopes);
       });
       const result = captured.result as any;
       if (result.search) {
@@ -203,9 +252,9 @@ export class AdminDemoController {
     }
   }
 
-  private async runTellChat(route: ChatRoute) {
+  private async runTellChat(route: ChatRoute, tenant: string) {
     const emittedAt = route.validFrom?.iso ?? new Date().toISOString();
-    const ingest = await this.ingest.ingestMention(DEMO_LIVE_COMPANY, {
+    const ingest = await this.ingest.ingestMention(tenant, {
       text: route.normalizedMessage,
       contextRef: { vertical: 'shop' },
       emittedAt,
@@ -216,7 +265,7 @@ export class AdminDemoController {
     // query sees the merged shape.
     let autoDedup: { identityLinksCreated?: number } | undefined;
     try {
-      const r = await this.dreams.runForTenant(DEMO_LIVE_COMPANY, ['dedup']);
+      const r = await this.dreams.runForTenant(tenant, ['dedup']);
       autoDedup = r.dedup
         ? { identityLinksCreated: r.dedup.identityLinksCreated }
         : undefined;
@@ -231,10 +280,9 @@ export class AdminDemoController {
   private async runAskChat(
     route: ChatRoute,
     body: { message: string; includePii?: boolean },
+    tenant: string,
+    scopes: readonly BrainScope[],
   ) {
-    const scopes = body.includePii
-      ? ['brain:read', 'brain:read_pii']
-      : ['brain:read'];
     const queryText = route.cleanedQuery ?? body.message;
     const entityRefs = route.mentions.map((m) => m.canonical);
     const predicateHints = route.predicateHints.map((h) => h.predicateId);
@@ -248,12 +296,12 @@ export class AdminDemoController {
     // is one edge away.
     const graph = await traceSpan('demo.graph_first', () =>
       this.search.graphRetrieve(
-        DEMO_LIVE_COMPANY,
+        tenant,
         queryText,
         entityRefs,
         predicateHints,
         asOf,
-        scopes,
+        scopes as string[],
       ),
     );
     const graphHasFacts = graph.results.some(
@@ -283,7 +331,7 @@ export class AdminDemoController {
         : 'no named subject — topical query',
     });
     const search = await this.search.search(
-      DEMO_LIVE_COMPANY,
+      tenant,
       { query: queryText, limit: 5, asOf } as any,
       scopes as any,
     );
@@ -297,11 +345,13 @@ export class AdminDemoController {
   @Post('dreams')
   @RequireScopes('brain:admin')
   async demoDreams(
+    @Req() req: AuthenticatedRequest,
     @Body() body: { operations?: ('dedup' | 'resolve')[] },
   ) {
+    const tenant = demoTenantFor(req);
     const captured = await runWithDebugTrace(() =>
       this.dreams.runForTenant(
-        DEMO_LIVE_COMPANY,
+        tenant,
         body?.operations ?? ['dedup', 'resolve'],
       ),
     );
@@ -317,10 +367,11 @@ export class AdminDemoController {
 
   @Get('state')
   @RequireScopes('brain:admin')
-  async demoState() {
+  async demoState(@Req() req: AuthenticatedRequest) {
+    const tenant = demoTenantFor(req);
     try {
       return await this.surreal.withCompany(
-        DEMO_LIVE_COMPANY,
+        tenant,
         async (db) => {
           const [eRows, fRows, lastRows] = (await db.query<
             [
@@ -349,9 +400,10 @@ export class AdminDemoController {
 
   @Post('reset')
   @RequireScopes('brain:admin')
-  async demoReset() {
+  async demoReset(@Req() req: AuthenticatedRequest) {
+    const tenant = demoTenantFor(req);
     try {
-      await this.surreal.dropCompanyDatabase(DEMO_LIVE_COMPANY);
+      await this.surreal.dropCompanyDatabase(tenant);
     } catch (e) {
       // Reset is idempotent — a missing DB is a success state.
       return { dropped: false, reason: (e as Error).message };
@@ -359,14 +411,14 @@ export class AdminDemoController {
     return { dropped: true };
   }
 
-  private async fetchKnownEntityNames(): Promise<string[]> {
+  private async fetchKnownEntityNames(tenant: string): Promise<string[]> {
     // Top 25 canonical names from the demo tenant — bounded so the
     // router prompt doesn't bloat. Best-effort: if the tenant is empty
     // / the read fails, return [] and the router just won't
     // canonicalise this turn.
     try {
       return await this.surreal.withCompany(
-        DEMO_LIVE_COMPANY,
+        tenant,
         async (db) => {
           const [rows] = await db.query<
             [Array<{ canonicalName: string }>]
