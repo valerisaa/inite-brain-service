@@ -238,6 +238,22 @@ jobs:
                 # cache populates as LLM extractions land, so the gate
                 # starts cold and warms with usage.
                 - EXTRACTOR_SKIP_LLM_ENABLED=true
+                # Phase 3.C ConU conformal guardrail (synthesize.service).
+                # Floor on the isotonic-calibrated confidence below which a
+                # fact is not eligible as a citation target — facts above
+                # still appear in the search response, just don't ground
+                # the generator. 0.30 matches the bitemporal resolver
+                # reject_threshold so a fact admitted as INSERTED is also
+                # admitted as a citation. Drop to 0 to disable.
+                - SYNTHESIZE_MIN_CONFIDENCE=0.30
+                # OpenTelemetry GenAI SemConv. When enabled, every
+                # gen_ai.chat.* and gen_ai.embed.* span carries the
+                # standard semconv attributes (gen_ai.system,
+                # gen_ai.request.model, gen_ai.usage.*). OTLP endpoint
+                # defaults to OTEL_EXPORTER_OTLP_ENDPOINT — set the
+                # standard env var alongside this flag when wiring up
+                # a backend (Langfuse, Phoenix, Tempo, …).
+                - OTEL_ENABLED=1
                 # Eval baselines — persisted to a host bind-mount so they
                 # survive container recreate (compose pull + up = new
                 # container; an in-image var/ would evaporate on every

@@ -133,8 +133,16 @@ export class SynthesizeService {
     );
     this.defaultGuardrails =
       raw === 'lenient' || raw === 'off' ? raw : 'strict';
+    // ConU conformal guardrail floor. Pre-fix the default was 0 (off);
+    // the audit found prod also never set the env, so the guardrail
+    // short-circuited at applyConformalGuardrail():53 and the Phase 3.C
+    // claim was unfulfilled. The default is now 0.30 — equivalent to
+    // the bitemporal RESOLVER reject_threshold so a fact admitted as a
+    // valid INSERTED by the conflict resolver is also admitted as a
+    // valid synthesize citation. Operators can disable per-deployment
+    // by setting SYNTHESIZE_MIN_CONFIDENCE=0.
     this.minCalibratedConfidence = parseFloat(
-      this.configService.get<string>('SYNTHESIZE_MIN_CONFIDENCE', '0'),
+      this.configService.get<string>('SYNTHESIZE_MIN_CONFIDENCE', '0.30'),
     );
   }
 
