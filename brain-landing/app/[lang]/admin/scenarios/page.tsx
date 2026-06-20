@@ -195,6 +195,7 @@ export default function ScenariosListPage() {
             </h2>
             <BatchSummary results={results} />
           </div>
+          <SliceTable results={results} />
           {results.map((r) => (
             <div key={r.scenarioId} className="border-t border-[var(--border)] pt-3">
               <div className="text-xs font-mono text-[var(--text)] mb-1">
@@ -228,6 +229,94 @@ function BatchSummary({ results }: { results: ScenarioRunOutcome[] }) {
       <span className="font-mono text-[var(--text-muted)]">
         recall@1 {(meanRecall1 * 100).toFixed(1)}%
       </span>
+    </div>
+  )
+}
+
+interface SliceRow {
+  key: string
+  n: number
+  passed: number
+  meanRecall1: number
+  meanRecall5: number
+}
+
+function aggregateBy(
+  results: ScenarioRunOutcome[],
+  pick: (r: ScenarioRunOutcome) => string,
+): SliceRow[] {
+  const byKey = new Map<string, ScenarioRunOutcome[]>()
+  for (const r of results) {
+    const k = pick(r) || '_unknown'
+    const arr = byKey.get(k) ?? []
+    arr.push(r)
+    byKey.set(k, arr)
+  }
+  return [...byKey.entries()]
+    .map(([key, arr]) => ({
+      key,
+      n: arr.length,
+      passed: arr.filter((r) => r.passed).length,
+      meanRecall1:
+        arr.reduce((a, r) => a + (r.metrics?.recallAt1 ?? 0), 0) / arr.length,
+      meanRecall5:
+        arr.reduce((a, r) => a + (r.metrics?.recallAt5 ?? 0), 0) / arr.length,
+    }))
+    .sort((a, b) => a.key.localeCompare(b.key))
+}
+
+export function SliceTable({ results }: { results: ScenarioRunOutcome[] }) {
+  const slices = aggregateBy(results, (r) => r.vertical)
+  if (slices.length <= 1) return null
+  return (
+    <div>
+      <div className="text-[10px] uppercase tracking-wider text-[var(--text-faint)] mb-1">
+        Slice by vertical
+      </div>
+      <table className="w-full text-xs border border-[var(--border)] rounded-md overflow-hidden">
+        <thead className="bg-[var(--bg-overlay)] text-[var(--text-faint)] text-[10px] uppercase tracking-wider">
+          <tr>
+            <th className="text-left px-3 py-1.5">vertical</th>
+            <th className="text-right px-3 py-1.5">n</th>
+            <th className="text-right px-3 py-1.5">passed</th>
+            <th className="text-right px-3 py-1.5">mean recall@1</th>
+            <th className="text-right px-3 py-1.5">mean recall@5</th>
+          </tr>
+        </thead>
+        <tbody>
+          {slices.map((s) => {
+            const passRate = s.passed / s.n
+            return (
+              <tr
+                key={s.key}
+                className="border-t border-[var(--border)] font-mono"
+              >
+                <td className="px-3 py-1 text-[var(--text)]">{s.key}</td>
+                <td className="px-3 py-1 text-right text-[var(--text-muted)]">
+                  {s.n}
+                </td>
+                <td
+                  className={`px-3 py-1 text-right ${
+                    passRate === 1
+                      ? 'text-[var(--success)]'
+                      : passRate >= 0.5
+                        ? 'text-[var(--warning)]'
+                        : 'text-[var(--danger)]'
+                  }`}
+                >
+                  {s.passed}/{s.n}
+                </td>
+                <td className="px-3 py-1 text-right">
+                  {(s.meanRecall1 * 100).toFixed(1)}%
+                </td>
+                <td className="px-3 py-1 text-right">
+                  {(s.meanRecall5 * 100).toFixed(1)}%
+                </td>
+              </tr>
+            )
+          })}
+        </tbody>
+      </table>
     </div>
   )
 }

@@ -13,6 +13,7 @@ import {
   ListChecks,
   Network,
   Presentation,
+  Sigma,
   Tags,
   Waypoints,
 } from 'lucide-react'
@@ -50,6 +51,7 @@ const GROUPS: Group[] = [
     items: [
       { slug: 'scenarios', title: 'Scenarios', icon: ListChecks },
       { slug: 'baselines', title: 'Baselines', icon: ClipboardList },
+      { slug: 'calibration', title: 'Calibration', icon: Sigma },
       { slug: 'traces', title: 'Traces', icon: Waypoints },
     ],
   },

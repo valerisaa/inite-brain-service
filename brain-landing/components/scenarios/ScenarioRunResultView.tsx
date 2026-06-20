@@ -5,6 +5,8 @@ import {
   AlertTriangle,
   CheckCircle2,
   ChevronRight,
+  Languages,
+  Quote,
   ShieldAlert,
   XCircle,
 } from 'lucide-react'
@@ -47,6 +49,22 @@ export interface IdentityMergeOutcomeShape {
   detail?: string
 }
 
+export interface SynthesizeOutcomeShape {
+  scenarioId: string
+  query: string
+  answer: string | null
+  reason?: string
+  faithfulness: number | null
+  totalClaims: number
+  verifierFailureKind?: 'length_mismatch' | 'invalid_verdicts' | 'exception'
+  passed: boolean
+  faithfulnessFloor: number
+  answerLangDetected?: string | null
+  answerLangCorrect?: boolean
+  decisionLogCitationCount?: number
+  avgExtractionEntropy?: number | null
+}
+
 export interface ScenarioRunOutcome {
   scenarioId: string
   vertical: string
@@ -66,6 +84,7 @@ export interface ScenarioRunOutcome {
   memoryAssertionResults: MemoryAssertionResult[]
   identityMergeResult?: IdentityMergeOutcomeShape
   synthesizeSkipped?: { count: number; reason: string }
+  synthesizeOutcomes?: SynthesizeOutcomeShape[]
   metrics: {
     recallAt1: number
     recallAt5: number
@@ -184,6 +203,197 @@ export function ScenarioRunResultView({
           </div>
         </div>
       )}
+
+      {outcome.synthesizeOutcomes && outcome.synthesizeOutcomes.length > 0 && (
+        <SynthesizeSection outcomes={outcome.synthesizeOutcomes} />
+      )}
+    </div>
+  )
+}
+
+function SynthesizeSection({
+  outcomes,
+}: {
+  outcomes: SynthesizeOutcomeShape[]
+}) {
+  const meanFaith =
+    outcomes
+      .filter((o) => typeof o.faithfulness === 'number')
+      .reduce((a, o) => a + (o.faithfulness ?? 0), 0) /
+    Math.max(1, outcomes.filter((o) => typeof o.faithfulness === 'number').length)
+  const langChecked = outcomes.filter((o) => o.answerLangCorrect !== undefined)
+  const langOk = langChecked.filter((o) => o.answerLangCorrect === true).length
+  const cited = outcomes.filter(
+    (o) => (o.decisionLogCitationCount ?? 0) > 0 && o.answer !== null,
+  ).length
+  const withAnswer = outcomes.filter((o) => o.answer !== null).length
+  const entropyVals = outcomes
+    .map((o) => o.avgExtractionEntropy)
+    .filter((v): v is number => typeof v === 'number')
+  const meanEntropy =
+    entropyVals.length === 0
+      ? null
+      : entropyVals.reduce((a, b) => a + b, 0) / entropyVals.length
+  return (
+    <div>
+      <h3 className="text-xs uppercase tracking-wider text-[var(--text-faint)] mb-1">
+        Synthesize ({outcomes.length})
+      </h3>
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-xs mb-2">
+        <Metric label="mean faithfulness" value={meanFaith} />
+        {langChecked.length > 0 && (
+          <Metric
+            label="answer-lang ok"
+            value={`${langOk}/${langChecked.length}`}
+          />
+        )}
+        {withAnswer > 0 && (
+          <Metric label="cited" value={`${cited}/${withAnswer}`} />
+        )}
+        {meanEntropy !== null && (
+          <Metric
+            label="mean extraction H"
+            value={meanEntropy.toFixed(3)}
+          />
+        )}
+      </div>
+      <ul className="space-y-1">
+        {outcomes.map((s, i) => (
+          <SynthesizeRow key={i} s={s} />
+        ))}
+      </ul>
+    </div>
+  )
+}
+
+function SynthesizeRow({ s }: { s: SynthesizeOutcomeShape }) {
+  const [open, setOpen] = useState(false)
+  const faithBad =
+    typeof s.faithfulness === 'number' &&
+    s.faithfulness < s.faithfulnessFloor
+  return (
+    <li
+      className={`border rounded-md p-2 ${
+        s.passed
+          ? 'border-[var(--border)]'
+          : 'border-[var(--danger)]/40 bg-[var(--danger)]/5'
+      }`}
+    >
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="w-full flex items-center gap-2 text-left"
+      >
+        <ChevronRight
+          className={`w-3 h-3 transition-transform ${open ? 'rotate-90' : ''}`}
+        />
+        {s.passed ? (
+          <CheckCircle2 className="w-3.5 h-3.5 text-[var(--accent)]" />
+        ) : (
+          <XCircle className="w-3.5 h-3.5 text-[var(--danger)]" />
+        )}
+        <span className="text-sm text-[var(--text)] truncate">{s.query}</span>
+        {s.answerLangCorrect === false && (
+          <Languages
+            className="w-3.5 h-3.5 text-[var(--danger)]"
+            aria-label="wrong language"
+          />
+        )}
+        {s.answer !== null && (s.decisionLogCitationCount ?? 0) === 0 && (
+          <Quote
+            className="w-3.5 h-3.5 text-[var(--warning)]"
+            aria-label="no citations"
+          />
+        )}
+        <span className="ml-auto text-xs text-[var(--text-faint)] flex items-center gap-2">
+          {typeof s.faithfulness === 'number' && (
+            <span
+              className={
+                faithBad
+                  ? 'text-[var(--danger)] font-mono'
+                  : 'text-[var(--text-muted)] font-mono'
+              }
+            >
+              faith {s.faithfulness.toFixed(2)}/{s.faithfulnessFloor.toFixed(2)}
+            </span>
+          )}
+        </span>
+      </button>
+      {open && (
+        <div className="mt-2 ml-5 text-xs space-y-1.5">
+          {s.answer ? (
+            <div className="text-[var(--text-muted)]">
+              <span className="text-[10px] text-[var(--text-faint)] uppercase">
+                answer
+              </span>
+              <div className="mt-0.5 p-2 rounded bg-[var(--bg)] border border-[var(--border)] text-[var(--text)] whitespace-pre-wrap">
+                {s.answer}
+              </div>
+            </div>
+          ) : (
+            <div className="text-[var(--text-faint)]">
+              no answer (
+              {s.reason ?? 'unspecified'})
+            </div>
+          )}
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-[10px] font-mono">
+            <Cell label="claims" value={s.totalClaims.toString()} />
+            <Cell
+              label="floor"
+              value={s.faithfulnessFloor.toFixed(2)}
+            />
+            {s.answerLangDetected && (
+              <Cell label="lang" value={s.answerLangDetected} />
+            )}
+            {typeof s.decisionLogCitationCount === 'number' && (
+              <Cell
+                label="citations"
+                value={s.decisionLogCitationCount.toString()}
+              />
+            )}
+            {typeof s.avgExtractionEntropy === 'number' && (
+              <Cell
+                label="extraction H"
+                value={s.avgExtractionEntropy.toFixed(3)}
+              />
+            )}
+            {s.verifierFailureKind && (
+              <Cell
+                label="verifier"
+                value={s.verifierFailureKind}
+                tone="danger"
+              />
+            )}
+          </div>
+        </div>
+      )}
+    </li>
+  )
+}
+
+function Cell({
+  label,
+  value,
+  tone,
+}: {
+  label: string
+  value: string
+  tone?: 'danger'
+}) {
+  return (
+    <div>
+      <div className="text-[10px] text-[var(--text-faint)] uppercase tracking-wider">
+        {label}
+      </div>
+      <div
+        className={
+          tone === 'danger'
+            ? 'text-[var(--danger)]'
+            : 'text-[var(--text)]'
+        }
+      >
+        {value}
+      </div>
     </div>
   )
 }

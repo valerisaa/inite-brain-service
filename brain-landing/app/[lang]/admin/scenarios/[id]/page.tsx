@@ -7,6 +7,7 @@ import {
   ScenarioRunResultView,
   ScenarioRunOutcome,
 } from '../../../../../components/scenarios/ScenarioRunResultView'
+import { JsonView } from '../../../../../components/admin/JsonView'
 import { normalizeLang } from '../../../../../lib/i18n'
 
 export default function ScenarioDetailPage() {
@@ -101,9 +102,9 @@ export default function ScenarioDetailPage() {
             Scenario spec ({spec.setup?.length ?? 0} setup steps,{' '}
             {spec.queries?.length ?? 0} queries)
           </summary>
-          <pre className="px-3 py-2 text-[10px] font-mono whitespace-pre-wrap max-h-96 overflow-auto">
-            {JSON.stringify(spec, null, 2)}
-          </pre>
+          <div className="px-3 py-2 max-h-[32rem] overflow-auto">
+            <JsonView value={spec} />
+          </div>
         </details>
       )}
     </div>

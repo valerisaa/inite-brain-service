@@ -21,6 +21,9 @@ import { CollapsePatternService } from './collapse-pattern.service';
 import { IntentClassifierService } from './intent-classifier.service';
 import { EmbedderService } from '../ai/embedder.service';
 import { ReindexEmbeddingsService } from '../ai/embedder/reindex-embeddings.service';
+import { CalibrationService } from '../ai/calibration/calibration.service';
+import { BOOTSTRAP_GOLD_SET } from '../ai/calibration/gold-set';
+import { applyMap } from '../ai/calibration/isotonic';
 import { DEMO_LIVE_COMPANY } from './admin-demo.controller';
 
 /**
@@ -49,6 +52,7 @@ export class AdminController {
     private readonly intentClassifier: IntentClassifierService,
     private readonly embedder: EmbedderService,
     private readonly reindex: ReindexEmbeddingsService,
+    private readonly calibration: CalibrationService,
   ) {}
 
   @Get('overview')
@@ -168,6 +172,88 @@ export class AdminController {
           ? parsedMaxFacts
           : undefined,
     });
+  }
+
+  /**
+   * Calibration cockpit data: the active isotonic map + reliability
+   * diagram bins + ECE/Brier scores computed against the bootstrap
+   * gold set. Operator-visible read of the in-process CalibrationService.
+   *
+   * Returns:
+   *   - map.thresholds[] / values[] / sampleCount: the active piecewise
+   *     monotone map.
+   *   - source: 'synthetic' (in-process gold set) or 'persisted'
+   *     (loaded from calibration_table on boot).
+   *   - reliability[]: per-bin (rawMid, predicted, empirical, count)
+   *     from the gold set. Drives the dashboard curve.
+   *   - ece: Expected Calibration Error (weighted abs gap).
+   *   - brier: Brier score over the gold set.
+   *   - curve[]: 21 (raw, calibrated) points sampling applyMap on
+   *     a 0..1 grid. Lets the UI render the calibration function.
+   */
+  @Get('calibration')
+  @RequireScopes('brain:admin')
+  async calibrationStats() {
+    const map = this.calibration.getMap();
+    const source = this.calibration.getBootstrapSource();
+    if (!map) {
+      return {
+        disabled: true,
+        source,
+        map: null,
+        reliability: [],
+        ece: 0,
+        brier: 0,
+        curve: [],
+      };
+    }
+    // Reliability bins from the gold set — fixed 10 buckets on [0,1].
+    const binCount = 10;
+    const bins = Array.from({ length: binCount }, (_, i) => ({
+      lower: i / binCount,
+      upper: (i + 1) / binCount,
+      midpoint: (i + 0.5) / binCount,
+      n: 0,
+      meanRaw: 0,
+      meanCorrect: 0,
+      meanCalibrated: 0,
+    }));
+    let brier = 0;
+    for (const p of BOOTSTRAP_GOLD_SET) {
+      const idx = Math.min(
+        binCount - 1,
+        Math.floor(p.rawConfidence * binCount),
+      );
+      const bin = bins[idx];
+      bin.n += 1;
+      bin.meanRaw += p.rawConfidence;
+      bin.meanCorrect += p.correctness;
+      const calibrated = applyMap(map, p.rawConfidence);
+      bin.meanCalibrated += calibrated;
+      brier += (p.rawConfidence - p.correctness) ** 2;
+    }
+    let ece = 0;
+    for (const b of bins) {
+      if (b.n === 0) continue;
+      b.meanRaw /= b.n;
+      b.meanCorrect /= b.n;
+      b.meanCalibrated /= b.n;
+      ece += (b.n / BOOTSTRAP_GOLD_SET.length) * Math.abs(b.meanRaw - b.meanCorrect);
+    }
+    brier /= Math.max(1, BOOTSTRAP_GOLD_SET.length);
+    const curve = Array.from({ length: 21 }, (_, i) => {
+      const raw = i / 20;
+      return { raw, calibrated: applyMap(map, raw) };
+    });
+    return {
+      disabled: false,
+      source,
+      map,
+      reliability: bins,
+      ece,
+      brier,
+      curve,
+    };
   }
 
   @Delete('tenants/:companyId')
