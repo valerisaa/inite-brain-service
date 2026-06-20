@@ -681,6 +681,49 @@ export class IngestService {
     const factId = result?.factId ? String(result.factId) : null;
     const outcome = result?.outcome as IngestOutcome | undefined;
 
+    // Phase 4.A locale tagging + Phase 1 HyPE alt-embedding — must
+    // apply to mention-ingested facts too, not just direct-ingest.
+    // Pre-fix only ingestFact() ran these passes, so chat-router /
+    // conversational corpora bypassed BOTH:
+    //   - lang/script never set → the locale-pinned retrieval pass
+    //     (where-builder lang filter) treated mention-ingested facts
+    //     as language-agnostic and they only survived via the legacy
+    //     `OR lang IS NONE` back-compat branch.
+    //   - altEmbedding never written → the question-shaped HyPE max
+    //     pool in runVectorLeg saw zero alt vectors for the conversa-
+    //     tional half of the corpus.
+    // Both passes mirror what ingestFact() does after fn::resolve_fact
+    // (same `outcome === INSERTED` gate, same UPDATE shape), so the
+    // demo-chat / chat-router path now has parity with the direct
+    // ingestion path for both Phase 1 and Phase 4.A/B.
+    if (factId && outcome === 'INSERTED') {
+      const detected = detectLanguage(object);
+      if (detected.language !== 'und') {
+        await db.query(
+          `UPDATE type::thing('knowledge_fact', $tail)
+              SET lang = $lang, script = $script`,
+          {
+            tail: idTailOf(factId),
+            lang: detected.language,
+            script: detected.script,
+          },
+        );
+      }
+    }
+
+    if (factId && this.hype.isEnabled() && outcome === 'INSERTED') {
+      const altEmbedding = await this.hype.generateAltEmbedding(
+        predicate,
+        object,
+      );
+      if (altEmbedding) {
+        await db.query(
+          `UPDATE type::thing('knowledge_fact', $tail) SET altEmbedding = $emb`,
+          { tail: idTailOf(factId), emb: altEmbedding },
+        );
+      }
+    }
+
     // Surface supersede / compete outcomes in the trace so the demo can
     // show "Berlin fact closed at July 1, Dublin became current" —
     // otherwise the chain is invisible to the operator.
