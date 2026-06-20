@@ -38,6 +38,10 @@ const ALLOWED_PREFIXES = [
   'v1/admin/forgotten',
   'v1/admin/pii',
   'v1/admin/operator-actions',
+  'v1/admin/health/components',
+  'v1/admin/migrations',
+  'v1/admin/throttler',
+  'v1/admin/now',
   // Brain user-facing endpoints used by the Playground tabs
   'v1/search',
   'v1/synthesize',

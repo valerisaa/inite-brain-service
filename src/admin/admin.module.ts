@@ -13,9 +13,12 @@ import { AdminEvalController } from './admin-eval.controller';
 import { AdminPredicatesController } from './admin-predicates.controller';
 import { AdminJobsController } from './admin-jobs.controller';
 import { AdminOpsController } from './admin-ops.controller';
+import { AdminInfraController } from './admin-infra.controller';
 import { AdminService } from './admin.service';
 import { OperatorActionService } from './operator-action.service';
 import { OperatorActionInterceptor } from './operator-action.interceptor';
+import { ThrottlerObservabilityService } from './throttler-observability.service';
+import { ThrottlerObservabilityInterceptor } from './throttler-observability.interceptor';
 import { ScenarioRunnerService } from './scenario-runner.service';
 import { BaselineService } from './baseline.service';
 import { ChatRouterService } from './chat-router.service';
@@ -41,6 +44,7 @@ import { ConfigInspectorService } from './config-inspector.service';
     AdminPredicatesController,
     AdminJobsController,
     AdminOpsController,
+    AdminInfraController,
   ],
   providers: [
     AdminService,
@@ -52,9 +56,14 @@ import { ConfigInspectorService } from './config-inspector.service';
     ChatRouterService,
     ConfigInspectorService,
     OperatorActionService,
+    ThrottlerObservabilityService,
     {
       provide: APP_INTERCEPTOR,
       useClass: OperatorActionInterceptor,
+    },
+    {
+      provide: APP_INTERCEPTOR,
+      useClass: ThrottlerObservabilityInterceptor,
     },
   ],
 })

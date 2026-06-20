@@ -56,7 +56,7 @@ export class SurrealService implements OnModuleInit, OnModuleDestroy {
   // (linear in tenant count, only paid on first request per tenant)
   // for steady-state correctness.
   private schemaQueue: Promise<unknown> = Promise.resolve();
-  private readonly migrator: SchemaMigrator;
+  readonly migrator: SchemaMigrator;
   // Dedicated long-lived root connection used ONLY by the migrator,
   // NOT in either pool. Without this, ensureSchema acquires a root
   // conn from the pool — and under N-way fan-out where N == poolSize
