@@ -22,6 +22,7 @@ import { IntentClassifierService } from './intent-classifier.service';
 import { EmbedderService } from '../ai/embedder.service';
 import { ReindexEmbeddingsService } from '../ai/embedder/reindex-embeddings.service';
 import { CalibrationService } from '../ai/calibration/calibration.service';
+import { CalibrationRefitService } from '../ai/calibration/calibration-refit.service';
 import { BOOTSTRAP_GOLD_SET } from '../ai/calibration/gold-set';
 import { applyMap } from '../ai/calibration/isotonic';
 import { DEMO_LIVE_COMPANY } from './admin-demo.controller';
@@ -53,6 +54,7 @@ export class AdminController {
     private readonly embedder: EmbedderService,
     private readonly reindex: ReindexEmbeddingsService,
     private readonly calibration: CalibrationService,
+    private readonly calibrationRefit: CalibrationRefitService,
   ) {}
 
   @Get('overview')
@@ -258,6 +260,7 @@ export class AdminController {
       const raw = i / 20;
       return { raw, calibrated: applyMap(map, raw) };
     });
+    const versions = await this.calibrationRefit.listVersions().catch(() => []);
     return {
       disabled: false,
       source,
@@ -266,6 +269,7 @@ export class AdminController {
       ece,
       brier,
       curve,
+      versions,
     };
   }
 

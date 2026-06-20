@@ -37,11 +37,19 @@ export interface DedupCandidate {
   cosine: number;
 }
 
+export interface DedupIdentityLink {
+  survivorId: string;
+  loserId: string;
+  cosine: number;
+}
+
 export interface DedupResult {
   suspectsEvaluated: number;
   llmJudgements: number;
   identityLinksCreated: number;
   unsurePairs: number;
+  /** Per-link detail for the admin UI drill-down. Empty when dedup didn't run. */
+  identityLinks: DedupIdentityLink[];
 }
 
 @Injectable()
@@ -110,6 +118,7 @@ export class DreamsDedupService {
       llmJudgements: 0,
       identityLinksCreated: 0,
       unsurePairs: 0,
+      identityLinks: [],
     };
     if (!this.isEnabled()) return result;
 
@@ -134,6 +143,11 @@ export class DreamsDedupService {
       if (verdict === 'same') {
         await this.linkIdentity(db, cand.aId, cand.bId);
         result.identityLinksCreated++;
+        result.identityLinks.push({
+          survivorId: cand.aId,
+          loserId: cand.bId,
+          cosine: cand.cosine,
+        });
       } else if (verdict === 'unsure') {
         result.unsurePairs++;
         this.logger.warn(

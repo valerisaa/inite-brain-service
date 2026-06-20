@@ -61,6 +61,17 @@ export class ChangefeedConsumerService {
     'knowledge_edge',
   ] as const;
 
+  /** Last successful tick timestamp (ISO). Exposed for admin status. */
+  private lastTickAt: string | null = null;
+  /** Last tick error, if any, with timestamp. */
+  private lastError: { message: string; ts: string } | null = null;
+  /** Sum of per-source pendingRemaining from the last tick. */
+  private lastPendingRemaining = 0;
+  /** Total rows consumed across all ticks since process start. */
+  private totalConsumed = 0;
+  /** Rough number of completed ticks since process start. */
+  private tickCount = 0;
+
   constructor(
     private readonly surreal: SurrealService,
     private readonly apiKeys: ApiKeyService,
@@ -82,19 +93,139 @@ export class ChangefeedConsumerService {
   async tick(): Promise<void> {
     if (!this.enabled || this.inFlight) return;
     this.inFlight = true;
+    let pendingThisTick = 0;
+    let consumedThisTick = 0;
     try {
       for (const companyId of this.apiKeys.knownCompanyIds()) {
         try {
-          await this.consumeForTenant(companyId);
+          const r = await this.consumeForTenant(companyId);
+          pendingThisTick += r.pendingRemaining;
+          consumedThisTick += Object.values(r.consumed).reduce(
+            (a, b) => a + b,
+            0,
+          );
         } catch (err) {
           this.logger.warn(
             `[changefeed] tenant=${companyId} failed: ${(err as Error).message}`,
           );
+          this.lastError = {
+            message: (err as Error).message,
+            ts: new Date().toISOString(),
+          };
         }
       }
+      this.lastTickAt = new Date().toISOString();
+      this.lastPendingRemaining = pendingThisTick;
+      this.totalConsumed += consumedThisTick;
+      this.tickCount += 1;
     } finally {
       this.inFlight = false;
     }
+  }
+
+  /**
+   * Operator-facing status snapshot. Read-only; surfaced via
+   * /v1/admin/changefeed/state.
+   */
+  stats(): {
+    enabled: boolean;
+    inFlight: boolean;
+    lastTickAt: string | null;
+    lastPendingRemaining: number;
+    totalConsumed: number;
+    tickCount: number;
+    lastError: { message: string; ts: string } | null;
+    sources: readonly string[];
+    perBatchLimit: number;
+  } {
+    return {
+      enabled: this.enabled,
+      inFlight: this.inFlight,
+      lastTickAt: this.lastTickAt,
+      lastPendingRemaining: this.lastPendingRemaining,
+      totalConsumed: this.totalConsumed,
+      tickCount: this.tickCount,
+      lastError: this.lastError,
+      sources: ChangefeedConsumerService.SOURCES,
+      perBatchLimit: this.perBatchLimit,
+    };
+  }
+
+  /**
+   * Operator-triggered drain — used by the admin "drain now" button.
+   * Bypasses the cron tick, runs synchronously, returns aggregate
+   * stats. inFlight guard still prevents overlap with a cron tick.
+   */
+  async drainNow(): Promise<{
+    consumed: Record<string, number>;
+    pendingRemaining: number;
+    tenants: number;
+  }> {
+    if (this.inFlight) {
+      return { consumed: {}, pendingRemaining: 0, tenants: 0 };
+    }
+    this.inFlight = true;
+    const consumed: Record<string, number> = {};
+    let pending = 0;
+    const tenants = this.apiKeys.knownCompanyIds();
+    try {
+      for (const companyId of tenants) {
+        try {
+          const r = await this.consumeForTenant(companyId);
+          for (const [k, v] of Object.entries(r.consumed)) {
+            consumed[k] = (consumed[k] ?? 0) + v;
+          }
+          pending += r.pendingRemaining;
+        } catch (e) {
+          this.lastError = {
+            message: (e as Error).message,
+            ts: new Date().toISOString(),
+          };
+        }
+      }
+      this.lastTickAt = new Date().toISOString();
+      this.lastPendingRemaining = pending;
+      this.totalConsumed += Object.values(consumed).reduce((a, b) => a + b, 0);
+      this.tickCount += 1;
+      return { consumed, pendingRemaining: pending, tenants: tenants.length };
+    } finally {
+      this.inFlight = false;
+    }
+  }
+
+  /**
+   * Per-source cursor table — joins the in-memory tick state with the
+   * persisted `changefeed_state` cursor per tenant + source. Cheap
+   * read; admin operators use it to spot tenants stuck behind a slow
+   * batch.
+   */
+  async cursorState(): Promise<
+    Array<{ companyId: string; source: string; cursor: number }>
+  > {
+    if (!this.enabled) return [];
+    const out: Array<{ companyId: string; source: string; cursor: number }> =
+      [];
+    for (const companyId of this.apiKeys.knownCompanyIds()) {
+      try {
+        await this.surreal.withCompany(companyId, async (db) => {
+          for (const source of ChangefeedConsumerService.SOURCES) {
+            try {
+              const cursor = await this.loadCursor(db, source);
+              out.push({ companyId, source, cursor });
+            } catch (e) {
+              this.logger.warn(
+                `[changefeed] cursor read failed (${companyId}/${source}): ${(e as Error).message}`,
+              );
+            }
+          }
+        });
+      } catch (e) {
+        this.logger.warn(
+          `[changefeed] cursorState failed for ${companyId}: ${(e as Error).message}`,
+        );
+      }
+    }
+    return out;
   }
 
   // Exposed so a unit test (or the admin debug endpoint) can drain

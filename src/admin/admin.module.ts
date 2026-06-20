@@ -5,10 +5,12 @@ import { IngestModule } from '../ingest/ingest.module';
 import { SearchModule } from '../search/search.module';
 import { FactsModule } from '../facts/facts.module';
 import { EntitiesModule } from '../entities/entities.module';
+import { AuditModule } from '../audit/audit.module';
 import { AdminController } from './admin.controller';
 import { AdminDemoController } from './admin-demo.controller';
 import { AdminEvalController } from './admin-eval.controller';
 import { AdminPredicatesController } from './admin-predicates.controller';
+import { AdminJobsController } from './admin-jobs.controller';
 import { AdminService } from './admin.service';
 import { ScenarioRunnerService } from './scenario-runner.service';
 import { BaselineService } from './baseline.service';
@@ -25,12 +27,14 @@ import { IntentClassifierService } from './intent-classifier.service';
     SearchModule,
     FactsModule,
     EntitiesModule,
+    AuditModule,
   ],
   controllers: [
     AdminController,
     AdminDemoController,
     AdminEvalController,
     AdminPredicatesController,
+    AdminJobsController,
   ],
   providers: [
     AdminService,

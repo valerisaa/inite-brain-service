@@ -60,6 +60,7 @@ describe('DreamsService', () => {
             llmJudgements: 0,
             identityLinksCreated: 0,
             unsurePairs: 0,
+            identityLinks: [],
           }
         );
       },
@@ -78,6 +79,7 @@ describe('DreamsService', () => {
           llmJudgements: 0,
           resolutionsApplied: 0,
           unsurePairs: 0,
+          resolutions: [],
         },
     } as unknown as DreamsResolverService;
   }
@@ -129,6 +131,7 @@ describe('DreamsService', () => {
         llmJudgements: 2,
         identityLinksCreated: 1,
         unsurePairs: 1,
+        identityLinks: [],
       },
     });
     const { metrics } = makeMetrics();
@@ -162,6 +165,7 @@ describe('DreamsService', () => {
           llmJudgements: 5,
           resolutionsApplied: 3,
           unsurePairs: 2,
+          resolutions: [],
         },
       }),
       makeCompaction(),
@@ -215,6 +219,7 @@ describe('DreamsService', () => {
           llmJudgements: 0,
           identityLinksCreated: 0,
           unsurePairs: 0,
+          identityLinks: [],
         };
       },
     } as unknown as DreamsDedupService;
@@ -255,6 +260,7 @@ describe('DreamsService', () => {
           llmJudgements: 1,
           identityLinksCreated: 1,
           unsurePairs: 0,
+          identityLinks: [],
         },
       }),
       makeResolver({ enabled: false }),
@@ -276,6 +282,7 @@ describe('DreamsService', () => {
         llmJudgements: 0,
         identityLinksCreated: 2,
         unsurePairs: 0,
+        identityLinks: [],
       },
     });
     const svc = new DreamsService(

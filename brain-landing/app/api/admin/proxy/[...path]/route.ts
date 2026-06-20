@@ -28,6 +28,11 @@ const ALLOWED_PREFIXES = [
   'v1/admin/reindex/',
   'v1/admin/calibration',
   'v1/admin/cost',
+  'v1/admin/jobs',
+  'v1/admin/scheduler',
+  'v1/admin/changefeed',
+  'v1/admin/maintenance/',
+  'v1/admin/dreams',
   // Brain user-facing endpoints used by the Playground tabs
   'v1/search',
   'v1/synthesize',

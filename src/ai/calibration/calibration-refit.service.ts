@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Cron } from '@nestjs/schedule';
 import { ApiKeyService } from '../../auth/api-key.service';
@@ -9,6 +9,7 @@ import {
   type CalibrationMap,
 } from './isotonic';
 import { CalibrationService } from './calibration.service';
+import { JobRunService } from '../../jobs/job-run.service';
 
 /**
  * Phase 3.5 — nightly refit + source-trust recalculation.
@@ -50,6 +51,7 @@ export class CalibrationRefitService {
     private readonly apiKeys: ApiKeyService,
     private readonly calibration: CalibrationService,
     config: ConfigService,
+    @Optional() private readonly jobs?: JobRunService,
   ) {
     this.enabled =
       (config.get<string>('CALIBRATION_NIGHTLY_REFIT', 'true').toLowerCase()) ===
@@ -76,22 +78,65 @@ export class CalibrationRefitService {
 
   // ── Source-trust pass ────────────────────────────────────────────
 
-  async refitSourceTrust(): Promise<number> {
+  async refitSourceTrust(
+    trigger?: {
+      triggeredBy?: 'cron' | 'manual' | 'startup';
+      triggeredByActor?: string;
+    },
+  ): Promise<number> {
     const tenants = this.apiKeys.knownCompanyIds();
     let upserted = 0;
-    for (const companyId of tenants) {
+    const hostTenant = tenants[0];
+    let jobRow = null as null | Awaited<ReturnType<JobRunService['start']>>;
+    if (hostTenant && this.jobs) {
       try {
-        upserted += await this.refitSourceTrustForTenant(companyId);
+        jobRow = await this.jobs.start({
+          jobType: 'source_trust_refit',
+          companyId: hostTenant,
+          triggeredBy: trigger?.triggeredBy ?? 'cron',
+          triggeredByActor: trigger?.triggeredByActor,
+        });
       } catch (e) {
         this.logger.warn(
-          `source-trust refit failed for ${companyId}: ${(e as Error).message}`,
+          `source-trust job_run start failed: ${(e as Error).message}`,
         );
       }
     }
-    this.logger.log(
-      `source-trust refit done — ${upserted} row(s) upserted across ${tenants.length} tenant(s)`,
-    );
-    return upserted;
+    try {
+      for (const companyId of tenants) {
+        try {
+          upserted += await this.refitSourceTrustForTenant(companyId);
+          if (jobRow) {
+            await this.jobs?.updateProgress(jobRow, {
+              currentTenant: companyId,
+              upserted,
+            });
+          }
+        } catch (e) {
+          this.logger.warn(
+            `source-trust refit failed for ${companyId}: ${(e as Error).message}`,
+          );
+        }
+      }
+      this.logger.log(
+        `source-trust refit done — ${upserted} row(s) upserted across ${tenants.length} tenant(s)`,
+      );
+      if (jobRow) {
+        await this.jobs?.finish(jobRow, {
+          status: 'succeeded',
+          result: { upserted, tenants: tenants.length },
+        });
+      }
+      return upserted;
+    } catch (e) {
+      if (jobRow) {
+        await this.jobs?.finish(jobRow, {
+          status: 'failed',
+          error: { message: (e as Error).message, name: (e as Error).name },
+        });
+      }
+      throw e;
+    }
   }
 
   private async refitSourceTrustForTenant(companyId: string): Promise<number> {
@@ -154,32 +199,132 @@ export class CalibrationRefitService {
 
   // ── Calibration pass ─────────────────────────────────────────────
 
-  async refitCalibration(): Promise<number> {
+  async refitCalibration(
+    trigger?: {
+      triggeredBy?: 'cron' | 'manual' | 'startup';
+      triggeredByActor?: string;
+    },
+  ): Promise<number> {
     const tenants = this.apiKeys.knownCompanyIds();
-    const allPairs: CalibrationPair[] = [];
-    for (const companyId of tenants) {
+    const hostTenant = tenants[0];
+    let jobRow = null as null | Awaited<ReturnType<JobRunService['start']>>;
+    if (hostTenant && this.jobs) {
       try {
-        const pairs = await this.collectCalibrationPairsForTenant(companyId);
-        allPairs.push(...pairs);
+        jobRow = await this.jobs.start({
+          jobType: 'calibration_refit',
+          companyId: hostTenant,
+          triggeredBy: trigger?.triggeredBy ?? 'cron',
+          triggeredByActor: trigger?.triggeredByActor,
+        });
       } catch (e) {
         this.logger.warn(
-          `calibration pair collection failed for ${companyId}: ${(e as Error).message}`,
+          `calibration_refit job_run start failed: ${(e as Error).message}`,
         );
       }
     }
-    if (allPairs.length < 40) {
+    try {
+      const allPairs: CalibrationPair[] = [];
+      for (const companyId of tenants) {
+        try {
+          const pairs = await this.collectCalibrationPairsForTenant(companyId);
+          allPairs.push(...pairs);
+          if (jobRow) {
+            await this.jobs?.updateProgress(jobRow, {
+              currentTenant: companyId,
+              pairsCollected: allPairs.length,
+            });
+          }
+        } catch (e) {
+          this.logger.warn(
+            `calibration pair collection failed for ${companyId}: ${(e as Error).message}`,
+          );
+        }
+      }
+      if (allPairs.length < 40) {
+        const msg = `calibration refit skipped — only ${allPairs.length} pair(s) (need 40+)`;
+        this.logger.log(msg);
+        if (jobRow) {
+          await this.jobs?.finish(jobRow, {
+            status: 'succeeded',
+            result: {
+              skipped: true,
+              skipReason: msg,
+              pairsCollected: allPairs.length,
+              floor: 40,
+            },
+          });
+        }
+        return 0;
+      }
+      const map = fitIsotonic(allPairs);
+      await this.persistCalibrationMap(map);
+      this.calibration.loadMap(this.extractorModel, this.bootstrapPromptKey, map);
       this.logger.log(
-        `calibration refit skipped — only ${allPairs.length} pair(s) (need 40+)`,
+        `calibration refit complete — samples=${map.sampleCount} bins=${map.thresholds.length}`,
       );
-      return 0;
+      if (jobRow) {
+        await this.jobs?.finish(jobRow, {
+          status: 'succeeded',
+          result: {
+            sampleCount: map.sampleCount,
+            bins: map.thresholds.length,
+          },
+        });
+      }
+      return map.sampleCount;
+    } catch (e) {
+      if (jobRow) {
+        await this.jobs?.finish(jobRow, {
+          status: 'failed',
+          error: { message: (e as Error).message, name: (e as Error).name },
+        });
+      }
+      throw e;
     }
-    const map = fitIsotonic(allPairs);
-    await this.persistCalibrationMap(map);
-    this.calibration.loadMap(this.extractorModel, this.bootstrapPromptKey, map);
-    this.logger.log(
-      `calibration refit complete — samples=${map.sampleCount} bins=${map.thresholds.length}`,
-    );
-    return map.sampleCount;
+  }
+
+  /**
+   * Read persisted calibration_table versions for the active extractor
+   * model. Operator-facing — surfaces the "what got persisted by the
+   * nightly job" trail.
+   */
+  async listVersions(): Promise<
+    Array<{
+      version: number;
+      sampleCount: number;
+      bins: number;
+      createdAt?: string;
+    }>
+  > {
+    const tenants = this.apiKeys.knownCompanyIds();
+    const host = tenants[0];
+    if (!host) return [];
+    return this.surreal.withCompany(host, async (db) => {
+      const [rows] = await db.query<
+        [
+          Array<{
+            version: number;
+            sampleCount: number;
+            thresholds: number[];
+            createdAt?: string;
+          }>,
+        ]
+      >(
+        `SELECT version, sampleCount, thresholds, createdAt
+            FROM calibration_table
+            WHERE extractorModel = $m AND promptHash = $p
+            ORDER BY version DESC LIMIT 50`,
+        { m: this.extractorModel, p: this.bootstrapPromptKey },
+      );
+      return (rows ?? []).map((r) => ({
+        version: r.version,
+        sampleCount: r.sampleCount,
+        bins: r.thresholds?.length ?? 0,
+        createdAt: r.createdAt
+          ? new Date(r.createdAt).toISOString()
+          : undefined,
+      }));
+    });
   }
 
   private async collectCalibrationPairsForTenant(

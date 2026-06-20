@@ -29,11 +29,22 @@ import { withSpan } from '../common/tracing';
  * The optimistic update keeps the loser fact intact on any DB error
  * — there is no "partial state" branch.
  */
+export interface ResolverResolution {
+  winnerFactId: string;
+  loserFactId: string;
+  predicate: string;
+  entityId: string;
+  winnerObject: string;
+  loserObject: string;
+}
+
 export interface ResolverResult {
   pairsConsidered: number;
   llmJudgements: number;
   resolutionsApplied: number;
   unsurePairs: number;
+  /** Per-resolution detail for the admin UI drill-down. */
+  resolutions: ResolverResolution[];
 }
 
 interface CompetingFactRow {
@@ -107,6 +118,7 @@ export class DreamsResolverService {
       llmJudgements: 0,
       resolutionsApplied: 0,
       unsurePairs: 0,
+      resolutions: [],
     };
     if (!this.isEnabled()) return result;
 
@@ -133,8 +145,18 @@ export class DreamsResolverService {
       }
       const loserId = verdict.kind === 'a_wins' ? String(pair.b.id) : String(pair.a.id);
       const winnerId = verdict.kind === 'a_wins' ? String(pair.a.id) : String(pair.b.id);
+      const winner = verdict.kind === 'a_wins' ? pair.a : pair.b;
+      const loser = verdict.kind === 'a_wins' ? pair.b : pair.a;
       await this.markSuperseded(db, loserId, winnerId);
       result.resolutionsApplied++;
+      result.resolutions.push({
+        winnerFactId: winnerId,
+        loserFactId: loserId,
+        predicate: winner.predicate,
+        entityId: String(winner.entityId),
+        winnerObject: winner.object,
+        loserObject: loser.object,
+      });
     }
 
     return result;

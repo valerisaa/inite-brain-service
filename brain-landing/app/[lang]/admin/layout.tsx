@@ -5,6 +5,7 @@ import { usePathname, useParams } from 'next/navigation'
 import { ReactNode, useState } from 'react'
 import {
   Activity,
+  CalendarClock,
   ClipboardList,
   Coins,
   Cpu,
@@ -13,8 +14,10 @@ import {
   History,
   ListChecks,
   Menu,
+  Moon,
   Network,
   Presentation,
+  Play,
   Sigma,
   Tags,
   UserRound,
@@ -46,6 +49,9 @@ const GROUPS: Group[] = [
     label: 'Ops',
     items: [
       { slug: 'explore/overview', title: 'Overview', icon: Activity },
+      { slug: 'maintenance', title: 'Maintenance', icon: CalendarClock },
+      { slug: 'jobs', title: 'Jobs', icon: Play },
+      { slug: 'dreams', title: 'Dreams', icon: Moon },
       { slug: 'cost', title: 'Cost', icon: Coins },
       { slug: 'audit', title: 'Audit log', icon: History },
       { slug: 'router', title: 'Router / cache', icon: Gauge },

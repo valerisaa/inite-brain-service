@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation'
 import { Command } from 'cmdk'
 import {
   Activity,
+  CalendarClock,
   ClipboardList,
   Coins,
   Cpu,
@@ -12,7 +13,9 @@ import {
   Gauge,
   History,
   ListChecks,
+  Moon,
   Network,
+  Play,
   Presentation,
   Search,
   Sigma,
@@ -63,6 +66,30 @@ export function CommandPalette({ lang }: { lang: string }) {
       hint: 'tenants · counters · health',
       icon: Activity,
       path: `/${lang}/admin/explore/overview`,
+    },
+    {
+      id: 'maintenance',
+      label: 'Maintenance',
+      hint: 'cron jobs · manual triggers',
+      icon: CalendarClock,
+      path: `/${lang}/admin/maintenance`,
+      keywords: ['cron', 'scheduler', 'job_run'],
+    },
+    {
+      id: 'jobs',
+      label: 'Jobs',
+      hint: 'long-running runs · live SSE',
+      icon: Play,
+      path: `/${lang}/admin/jobs`,
+      keywords: ['queue', 'job', 'progress'],
+    },
+    {
+      id: 'dreams',
+      label: 'Dreams',
+      hint: 'dedup + resolve runs',
+      icon: Moon,
+      path: `/${lang}/admin/dreams`,
+      keywords: ['nightly', 'identity', 'dedup'],
     },
     {
       id: 'cost',

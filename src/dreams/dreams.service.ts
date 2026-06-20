@@ -9,6 +9,7 @@ import { DreamsDedupService, DedupResult } from './dedup.service';
 import { DreamsResolverService, ResolverResult } from './resolver.service';
 import { CompactionService } from '../compaction/compaction.service';
 import { DreamsOperation } from './dto/run-dreams.dto';
+import { JobRunService, JobRunRow } from '../jobs/job-run.service';
 
 export interface DreamsTenantStats {
   companyId: string;
@@ -61,6 +62,7 @@ export class DreamsService {
     private readonly compaction: CompactionService,
     private readonly configService: ConfigService,
     @Optional() private readonly metrics?: MetricsService,
+    @Optional() private readonly jobs?: JobRunService,
   ) {
     this.enabled =
       this.configService.get<string>('DREAMS_ENABLED', '0') === '1';
@@ -137,10 +139,18 @@ export class DreamsService {
    * run sequentially — dedup tweaks the graph, which the resolver
    * then sees a cleaner context for. Order: dedup → resolve →
    * summarize.
+   *
+   * Also opens a job_run row + writes per-emit detail rows so the
+   * admin UI has history + drill-down. Triggered context (`cron` /
+   * `manual` / actor) is threaded through from the entry point.
    */
   async runForTenant(
     companyId: string,
     operations: DreamsOperation[],
+    triggered?: {
+      triggeredBy?: 'cron' | 'manual' | 'startup';
+      triggeredByActor?: string;
+    },
   ): Promise<DreamsTenantStats> {
     const t0 = Date.now();
     const stats: DreamsTenantStats = {
@@ -148,60 +158,160 @@ export class DreamsService {
       durationSeconds: 0,
     };
     const opSet = new Set(operations);
-
-    await this.surreal.withCompany(companyId, async (db) => {
-      if (opSet.has('dedup')) {
-        stats.dedup = await withSpan(
-          'dreams.dedup',
-          () => this.dedup.run(db),
-          { 'dreams.tenant': companyId },
-        );
-      }
-      if (opSet.has('resolve')) {
-        stats.resolve = await withSpan(
-          'dreams.resolve',
-          () => this.resolver.run(db),
-          { 'dreams.tenant': companyId },
-        );
-      }
-    });
-
-    if (opSet.has('summarize')) {
-      // Compaction owns its own connection lifecycle (it iterates
-      // over knowledge_fact in batches and updates statuses), so we
-      // delegate rather than threading the existing db handle in.
-      try {
-        await withSpan(
-          'dreams.summarize',
-          () => this.compaction.compactCompany(companyId),
-          { 'dreams.tenant': companyId },
-        );
-        stats.summarized = true;
-      } catch (err) {
-        this.logger.warn(
-          `Dreams summarize failed for ${companyId}: ${(err as Error).message}`,
-        );
-        stats.summarized = false;
-      }
-    }
-
-    stats.durationSeconds = (Date.now() - t0) / 1000;
-    this.metrics?.countDreams('ok');
-    if (stats.dedup) {
-      this.metrics?.countDreamsEmitted(
-        'identity_link',
-        stats.dedup.identityLinksCreated,
+    let jobRow: JobRunRow | null = null;
+    try {
+      jobRow =
+        (await this.jobs?.start({
+          jobType: 'dreams',
+          companyId,
+          triggeredBy: triggered?.triggeredBy ?? 'cron',
+          triggeredByActor: triggered?.triggeredByActor,
+          initialProgress: { operations: [...opSet] },
+        })) ?? null;
+    } catch (e) {
+      this.logger.warn(
+        `dreams job_run start failed for ${companyId}: ${(e as Error).message}`,
       );
     }
-    if (stats.resolve) {
-      this.metrics?.countDreamsEmitted(
-        'resolution',
-        stats.resolve.resolutionsApplied,
+
+    try {
+      await this.surreal.withCompany(companyId, async (db) => {
+        if (opSet.has('dedup')) {
+          stats.dedup = await withSpan(
+            'dreams.dedup',
+            () => this.dedup.run(db),
+            { 'dreams.tenant': companyId },
+          );
+          if (jobRow) {
+            await this.jobs?.updateProgress(jobRow, {
+              currentTenant: companyId,
+              dedupLinksCreated: stats.dedup.identityLinksCreated,
+            });
+          }
+        }
+        if (opSet.has('resolve')) {
+          stats.resolve = await withSpan(
+            'dreams.resolve',
+            () => this.resolver.run(db),
+            { 'dreams.tenant': companyId },
+          );
+          if (jobRow) {
+            await this.jobs?.updateProgress(jobRow, {
+              resolutionsApplied: stats.resolve.resolutionsApplied,
+            });
+          }
+        }
+        if (jobRow) {
+          await this.writeEmits(db, jobRow.runId, stats);
+        }
+      });
+
+      if (opSet.has('summarize')) {
+        // Compaction owns its own connection lifecycle (it iterates
+        // over knowledge_fact in batches and updates statuses), so we
+        // delegate rather than threading the existing db handle in.
+        try {
+          await withSpan(
+            'dreams.summarize',
+            () => this.compaction.compactCompany(companyId),
+            { 'dreams.tenant': companyId },
+          );
+          stats.summarized = true;
+        } catch (err) {
+          this.logger.warn(
+            `Dreams summarize failed for ${companyId}: ${(err as Error).message}`,
+          );
+          stats.summarized = false;
+        }
+      }
+
+      stats.durationSeconds = (Date.now() - t0) / 1000;
+      this.metrics?.countDreams('ok');
+      if (stats.dedup) {
+        this.metrics?.countDreamsEmitted(
+          'identity_link',
+          stats.dedup.identityLinksCreated,
+        );
+      }
+      if (stats.resolve) {
+        this.metrics?.countDreamsEmitted(
+          'resolution',
+          stats.resolve.resolutionsApplied,
+        );
+      }
+      if (stats.summarized) {
+        this.metrics?.countDreamsEmitted('summary', 1);
+      }
+      if (jobRow) {
+        await this.jobs?.finish(jobRow, {
+          status: 'succeeded',
+          result: {
+            durationSeconds: stats.durationSeconds,
+            identityLinksCreated: stats.dedup?.identityLinksCreated ?? 0,
+            resolutionsApplied: stats.resolve?.resolutionsApplied ?? 0,
+            summarized: stats.summarized ?? false,
+          },
+        });
+      }
+      return stats;
+    } catch (err) {
+      const e = err as Error;
+      if (jobRow) {
+        await this.jobs?.finish(jobRow, {
+          status: 'failed',
+          error: { message: e.message, name: e.name },
+        });
+      }
+      throw err;
+    }
+  }
+
+  /**
+   * Persist per-emit rows so the admin UI can answer "which merges
+   * did dream produce in this run?". Best-effort: a failure to write
+   * detail doesn't fail the run — the aggregate counters in
+   * job_run.result are the source of truth.
+   */
+  private async writeEmits(
+    db: any,
+    runId: string,
+    stats: DreamsTenantStats,
+  ): Promise<void> {
+    try {
+      for (const link of stats.dedup?.identityLinks ?? []) {
+        await db.query(
+          `CREATE dream_emit CONTENT {
+             runId: $runId, kind: 'identity_link',
+             subject: $subject, object: $object,
+             detail: $detail
+           }`,
+          {
+            runId,
+            subject: link.survivorId ?? null,
+            object: link.loserId ?? null,
+            detail: link,
+          },
+        );
+      }
+      for (const res of stats.resolve?.resolutions ?? []) {
+        await db.query(
+          `CREATE dream_emit CONTENT {
+             runId: $runId, kind: 'resolution',
+             subject: $subject, object: $object,
+             detail: $detail
+           }`,
+          {
+            runId,
+            subject: res.winnerFactId ?? null,
+            object: res.loserFactId ?? null,
+            detail: res,
+          },
+        );
+      }
+    } catch (e) {
+      this.logger.warn(
+        `dream_emit write failed (${runId}): ${(e as Error).message}`,
       );
     }
-    if (stats.summarized) {
-      this.metrics?.countDreamsEmitted('summary', 1);
-    }
-    return stats;
   }
 }

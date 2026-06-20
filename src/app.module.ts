@@ -21,6 +21,7 @@ import { DreamsModule } from './dreams/dreams.module';
 import { MetricsModule } from './metrics/metrics.module';
 import { AdminModule } from './admin/admin.module';
 import { AuditModule } from './audit/audit.module';
+import { JobsModule } from './jobs/jobs.module';
 
 @Module({
   imports: [
@@ -78,6 +79,7 @@ import { AuditModule } from './audit/audit.module';
     MetricsModule,
     AdminModule,
     AuditModule,
+    JobsModule,
   ],
   controllers: [HealthController],
   providers: [

@@ -15,7 +15,10 @@ import { withAdmin } from '@/lib/server-auth'
  * rejects with 403.
  */
 
-const ALLOWED_PREFIXES = ['v1/admin/traces/stream']
+const ALLOWED_PREFIXES = [
+  'v1/admin/traces/stream',
+  'v1/admin/jobs/stream',
+]
 
 function isAllowed(path: string): boolean {
   const normalized = path.replace(/^\/+/, '').replace(/\?.*$/, '')

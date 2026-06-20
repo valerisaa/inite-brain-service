@@ -15,7 +15,7 @@ import {
   YAxis,
   ComposedChart,
 } from 'recharts'
-import { RefreshCw } from 'lucide-react'
+import { Loader2, Play, RefreshCw } from 'lucide-react'
 
 interface ReliabilityBin {
   lower: number
@@ -32,6 +32,13 @@ interface CurvePoint {
   calibrated: number
 }
 
+interface CalibrationVersion {
+  version: number
+  sampleCount: number
+  bins: number
+  createdAt?: string
+}
+
 interface CalibrationResponse {
   disabled: boolean
   source: 'synthetic' | 'persisted'
@@ -44,6 +51,7 @@ interface CalibrationResponse {
   ece: number
   brier: number
   curve: CurvePoint[]
+  versions?: CalibrationVersion[]
   error?: string
 }
 
@@ -51,6 +59,7 @@ export function CalibrationPanel() {
   const [data, setData] = useState<CalibrationResponse | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [refitting, setRefitting] = useState(false)
 
   const load = async () => {
     setLoading(true)
@@ -72,6 +81,24 @@ export function CalibrationPanel() {
   useEffect(() => {
     void load()
   }, [])
+
+  const triggerRefit = async () => {
+    setRefitting(true)
+    setError(null)
+    try {
+      const res = await fetch(
+        '/api/admin/proxy/v1/admin/maintenance/calibration-refit',
+        { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' },
+      )
+      const json = await res.json()
+      if (!res.ok) throw new Error(json.error ?? `Failed ${res.status}`)
+      await load()
+    } catch (e) {
+      setError((e as Error).message)
+    } finally {
+      setRefitting(false)
+    }
+  }
 
   if (loading && !data) {
     return <div className="text-xs text-[var(--text-muted)]">Loading…</div>
@@ -97,14 +124,30 @@ export function CalibrationPanel() {
             {data.map ? `${data.map.sampleCount} samples` : 'disabled'}
           </p>
         </div>
-        <button
-          type="button"
-          onClick={() => void load()}
-          className="text-xs text-[var(--text-muted)] hover:text-[var(--text)] flex items-center gap-1"
-        >
-          <RefreshCw className={`w-3 h-3 ${loading ? 'animate-spin' : ''}`} />
-          refresh
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => void load()}
+            className="text-xs text-[var(--text-muted)] hover:text-[var(--text)] flex items-center gap-1"
+          >
+            <RefreshCw className={`w-3 h-3 ${loading ? 'animate-spin' : ''}`} />
+            refresh
+          </button>
+          <button
+            type="button"
+            onClick={() => void triggerRefit()}
+            disabled={refitting}
+            className="text-xs bg-[var(--accent)] text-white rounded-md px-2.5 py-1.5 flex items-center gap-1 disabled:opacity-50"
+            title="Manual nightly-refit. Mirrors the 03:51 UTC cron — collects last-30d retraction outcomes, fits new isotonic map, persists a new version."
+          >
+            {refitting ? (
+              <Loader2 className="w-3 h-3 animate-spin" />
+            ) : (
+              <Play className="w-3 h-3" />
+            )}
+            Refit now
+          </button>
+        </div>
       </header>
 
       {data.disabled && (
@@ -314,6 +357,45 @@ export function CalibrationPanel() {
               </ResponsiveContainer>
             </ChartCard>
           </section>
+
+          {data.versions && data.versions.length > 0 && (
+            <section>
+              <div className="text-[10px] uppercase tracking-wider text-[var(--text-faint)] mb-1">
+                Persisted versions ({data.versions.length})
+              </div>
+              <table className="w-full text-xs border border-[var(--border)] rounded-md overflow-hidden">
+                <thead className="bg-[var(--bg-overlay)] text-[var(--text-faint)] text-[10px] uppercase tracking-wider">
+                  <tr>
+                    <th className="text-right px-3 py-1.5">version</th>
+                    <th className="text-right px-3 py-1.5">samples</th>
+                    <th className="text-right px-3 py-1.5">bins</th>
+                    <th className="text-left px-3 py-1.5">createdAt</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {data.versions.map((v) => (
+                    <tr
+                      key={v.version}
+                      className="border-t border-[var(--border)] font-mono"
+                    >
+                      <td className="px-3 py-1 text-right text-[var(--accent)]">
+                        {v.version}
+                      </td>
+                      <td className="px-3 py-1 text-right text-[var(--text)] tabular-nums">
+                        {v.sampleCount.toLocaleString()}
+                      </td>
+                      <td className="px-3 py-1 text-right text-[var(--text-muted)] tabular-nums">
+                        {v.bins}
+                      </td>
+                      <td className="px-3 py-1 text-[10px] text-[var(--text-muted)]">
+                        {v.createdAt ?? '—'}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </section>
+          )}
 
           {data.map && (
             <section>
