@@ -8,8 +8,11 @@ import {
   Post,
   Query,
   Req,
+  Sse,
   UseGuards,
 } from '@nestjs/common';
+import type { Observable } from 'rxjs';
+import { filter, map } from 'rxjs/operators';
 import { ApiKeyGuard, RequireScopes } from '../auth/api-key.guard';
 import type { AuthenticatedRequest } from '../auth/api-key.types';
 import {
@@ -177,13 +180,36 @@ export class AdminEvalController {
     return { traces: this.traces.list(req.brainAuth.companyId) };
   }
 
+  /**
+   * Server-Sent Events stream of NEW trace metadata, scoped to the
+   * caller's companyId. Lets the /admin/traces page push-update in
+   * real time instead of poll-refreshing every 3s.
+   *
+   *   GET /v1/admin/traces/stream
+   *
+   * The stream emits a TraceListItem (no spans / no artifacts) on
+   * each accepted snapshot matching the caller. EventSource on the
+   * client auto-reconnects on transport hiccup.
+   */
+  @Sse('traces/stream')
+  @RequireScopes('brain:admin')
+  streamTraces(
+    @Req() req: AuthenticatedRequest,
+  ): Observable<{ data: unknown }> {
+    const tenant = req.brainAuth.companyId;
+    return this.traces.observe().pipe(
+      filter((t) => !tenant || t.companyId === tenant),
+      map((t) => ({ data: t })),
+    );
+  }
+
   @Get('traces/:requestId')
   @RequireScopes('brain:admin')
-  getTrace(
+  async getTrace(
     @Req() req: AuthenticatedRequest,
     @Param('requestId') requestId: string,
   ) {
-    const t = this.traces.get(requestId, req.brainAuth.companyId);
+    const t = await this.traces.get(requestId, req.brainAuth.companyId);
     if (!t) throw new NotFoundException(`Trace ${requestId} not found`);
     return t;
   }
