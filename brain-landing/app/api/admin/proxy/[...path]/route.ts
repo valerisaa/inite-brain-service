@@ -27,6 +27,7 @@ const ALLOWED_PREFIXES = [
   'v1/admin/router/stats',
   'v1/admin/reindex/',
   'v1/admin/calibration',
+  'v1/admin/cost',
   // Brain user-facing endpoints used by the Playground tabs
   'v1/search',
   'v1/synthesize',

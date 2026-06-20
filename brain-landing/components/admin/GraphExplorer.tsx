@@ -66,6 +66,7 @@ function GraphExplorerInner() {
   const [layout, setLayout] = useState<LayoutMode>('force')
   const [predicateFilter, setPredicateFilter] = useState<Set<string>>(new Set())
   const [asOf, setAsOf] = useState<string | null>(null)
+  const [recordedAt, setRecordedAt] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [expanding, setExpanding] = useState(false)
 
@@ -172,7 +173,10 @@ function GraphExplorerInner() {
       setExpanding(true)
       setError(null)
       try {
-        const qs = asOf ? `?asOf=${encodeURIComponent(asOf)}` : ''
+        const params = new URLSearchParams()
+        if (asOf) params.set('asOf', asOf)
+        if (recordedAt) params.set('recordedAt', recordedAt)
+        const qs = params.toString() ? `?${params.toString()}` : ''
         const res = await fetch(
           `/api/admin/proxy/v1/entities/${encodeURIComponent(entityId)}/connections${qs}`,
         )
@@ -222,7 +226,7 @@ function GraphExplorerInner() {
         setExpanding(false)
       }
     },
-    [nodes, edges, updateGraph, asOf],
+    [nodes, edges, updateGraph, asOf, recordedAt],
   )
 
   // Wire reactflow's own change-pipeline so drag motion is rendered.
@@ -280,7 +284,14 @@ function GraphExplorerInner() {
         <div className="w-64 max-w-[40vw] shrink-0">
           <EntitySearch onSelect={addSeed} />
         </div>
-        <AsOfSlider asOf={asOf} onChange={setAsOf} />
+        <AsOfSlider
+          asOf={asOf}
+          recordedAt={recordedAt}
+          onChange={({ asOf: next, recordedAt: nextTx }) => {
+            setAsOf(next)
+            setRecordedAt(nextTx ?? null)
+          }}
+        />
         <div className="flex-1 min-w-0 overflow-x-auto">
           <PredicateFilter
             kinds={kinds}
@@ -382,6 +393,7 @@ function GraphExplorerInner() {
       <EntityPanel
         entityId={selectedId}
         asOf={asOf}
+        recordedAt={recordedAt}
         onClose={() => setSelectedId(null)}
         onExpand={(id) => void expand(id)}
       />

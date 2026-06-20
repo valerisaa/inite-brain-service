@@ -175,6 +175,19 @@ export class AdminController {
   }
 
   /**
+   * Operator-facing cost rollup. Pulls token counters out of the in-
+   * process Prometheus registry, applies env-overridable pricing,
+   * returns per-model + per-operation breakdown + grand total.
+   *
+   *   GET /v1/admin/cost
+   */
+  @Get('cost')
+  @RequireScopes('brain:admin')
+  async cost() {
+    return this.admin.buildCostBreakdown();
+  }
+
+  /**
    * Calibration cockpit data: the active isotonic map + reliability
    * diagram bins + ECE/Brier scores computed against the bootstrap
    * gold set. Operator-visible read of the in-process CalibrationService.

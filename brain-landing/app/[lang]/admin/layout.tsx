@@ -6,6 +6,7 @@ import { ReactNode } from 'react'
 import {
   Activity,
   ClipboardList,
+  Coins,
   Cpu,
   FlaskConical,
   Gauge,
@@ -41,6 +42,7 @@ const GROUPS: Group[] = [
     label: 'Ops',
     items: [
       { slug: 'explore/overview', title: 'Overview', icon: Activity },
+      { slug: 'cost', title: 'Cost', icon: Coins },
       { slug: 'audit', title: 'Audit log', icon: History },
       { slug: 'router', title: 'Router / cache', icon: Gauge },
       { slug: 'predicates', title: 'Predicates', icon: Tags },

@@ -80,6 +80,24 @@ export interface AuditQuery {
   limit?: number;
 }
 
+export interface CostBucket {
+  key: string;
+  calls: number;
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  usd: number;
+}
+
+export interface CostBreakdown {
+  total: { usd: number; tokens: number; calls: number };
+  perModel: CostBucket[];
+  perOperation: CostBucket[];
+  perTenant: CostBucket[];
+  pricing: Record<string, { promptPerMTok: number; completionPerMTok: number }>;
+  source: 'metrics';
+}
+
 export interface AuditPage {
   events: AuditEventRow[];
   totalsBySource: Record<string, number>;
@@ -213,6 +231,138 @@ export class AdminService {
       openaiCallsTotal: sumBuckets('brain_openai_calls_total'),
       openaiTokensTotal: sumBuckets('brain_openai_tokens_total'),
     };
+  }
+
+  /**
+   * Process-wide cost rollup from the Prometheus registry.
+   *
+   * The OpenAI counter is labelled (kind, type) where:
+   *   - kind ∈ {chat, embed}
+   *   - type ∈ {prompt, completion}
+   * which is the only attribution the in-process counter carries.
+   * Per-tenant attribution is not yet emitted in metric labels (would
+   * require lifting companyId into every Counter.inc call), so the
+   * perTenant bucket is empty until that lands; we expose the same
+   * shape so the UI doesn't need a special case once it does.
+   *
+   * Pricing defaults reflect the v2.2.8 default models (gpt-4o-mini +
+   * text-embedding-3-small). Overridable via env so the operator can
+   * pin their negotiated rates without redeploying.
+   */
+  async buildCostBreakdown(): Promise<CostBreakdown> {
+    const pricing = this.resolvePricing();
+    type Sample = { value: number; labels: Record<string, string> };
+    const tokens = (await this.collectMetric('brain_openai_tokens_total')) as
+      Sample[];
+    const calls = (await this.collectMetric('brain_openai_calls_total')) as
+      Sample[];
+    const perModelMap = new Map<string, CostBucket>();
+    const perOpMap = new Map<string, CostBucket>();
+    let totalTokens = 0;
+    let totalUsd = 0;
+    for (const t of tokens) {
+      const kind = t.labels.kind ?? 'unknown';
+      const type = t.labels.type ?? 'unknown';
+      const modelKey = kind === 'chat' ? 'chat' : kind === 'embed' ? 'embed' : kind;
+      const price = pricing[modelKey] ?? {
+        promptPerMTok: 0,
+        completionPerMTok: 0,
+      };
+      const usd =
+        type === 'prompt'
+          ? (t.value * price.promptPerMTok) / 1_000_000
+          : type === 'completion'
+            ? (t.value * price.completionPerMTok) / 1_000_000
+            : 0;
+      const modelBucket =
+        perModelMap.get(modelKey) ??
+        ({
+          key: modelKey,
+          calls: 0,
+          promptTokens: 0,
+          completionTokens: 0,
+          totalTokens: 0,
+          usd: 0,
+        } as CostBucket);
+      const opBucket =
+        perOpMap.get(kind) ??
+        ({
+          key: kind,
+          calls: 0,
+          promptTokens: 0,
+          completionTokens: 0,
+          totalTokens: 0,
+          usd: 0,
+        } as CostBucket);
+      if (type === 'prompt') {
+        modelBucket.promptTokens += t.value;
+        opBucket.promptTokens += t.value;
+      } else if (type === 'completion') {
+        modelBucket.completionTokens += t.value;
+        opBucket.completionTokens += t.value;
+      }
+      modelBucket.totalTokens += t.value;
+      opBucket.totalTokens += t.value;
+      modelBucket.usd += usd;
+      opBucket.usd += usd;
+      perModelMap.set(modelKey, modelBucket);
+      perOpMap.set(kind, opBucket);
+      totalTokens += t.value;
+      totalUsd += usd;
+    }
+    let totalCalls = 0;
+    for (const c of calls) {
+      const kind = c.labels.kind ?? 'unknown';
+      totalCalls += c.value;
+      const bucket = perOpMap.get(kind);
+      if (bucket) bucket.calls += c.value;
+      const modelKey = kind === 'chat' ? 'chat' : kind === 'embed' ? 'embed' : kind;
+      const mb = perModelMap.get(modelKey);
+      if (mb) mb.calls += c.value;
+    }
+    return {
+      total: { usd: totalUsd, tokens: totalTokens, calls: totalCalls },
+      perModel: [...perModelMap.values()].sort((a, b) => b.usd - a.usd),
+      perOperation: [...perOpMap.values()].sort((a, b) => b.usd - a.usd),
+      perTenant: [],
+      pricing,
+      source: 'metrics',
+    };
+  }
+
+  private resolvePricing(): CostBreakdown['pricing'] {
+    const parse = (val: string | undefined, fallback: number) => {
+      const n = val ? parseFloat(val) : NaN;
+      return Number.isFinite(n) ? n : fallback;
+    };
+    const env = process.env;
+    return {
+      chat: {
+        promptPerMTok: parse(env.COST_CHAT_PROMPT_USD_PER_MTOK, 0.15),
+        completionPerMTok: parse(env.COST_CHAT_COMPLETION_USD_PER_MTOK, 0.6),
+      },
+      embed: {
+        promptPerMTok: parse(env.COST_EMBED_USD_PER_MTOK, 0.02),
+        completionPerMTok: 0,
+      },
+    };
+  }
+
+  private async collectMetric(
+    name: string,
+  ): Promise<Array<{ value: number; labels: Record<string, string> }>> {
+    try {
+      const all = await this.metrics.registry.getMetricsAsJSON();
+      const m = all.find((x) => x.name === name);
+      const values = (m as { values?: any[] })?.values ?? [];
+      return values.map((v: any) => ({
+        value: typeof v.value === 'number' ? v.value : 0,
+        labels: (v.labels as Record<string, string>) ?? {},
+      }));
+    } catch (e) {
+      this.logger.warn(`collectMetric ${name} failed: ${(e as Error).message}`);
+      return [];
+    }
   }
 
   /**
