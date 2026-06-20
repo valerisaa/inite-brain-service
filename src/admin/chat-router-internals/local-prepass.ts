@@ -2,6 +2,7 @@ import * as chrono from 'chrono-node';
 import type { EmbedderService } from '../../ai/embedder.service';
 import type { PredicateSnapshot } from '../../ai/predicate-registry.service';
 import { cosineSimilarity } from '../../common/vector-math';
+import { traceArtifact } from '../../common/debug-trace';
 import type { Span } from './types';
 
 /**
@@ -215,7 +216,14 @@ export async function extractPredicateHintsLocally(
   let queryVec: number[];
   try {
     queryVec = await embedder.embed(message);
-  } catch {
+  } catch (e) {
+    // Embedder outage degrades chat-router to a no-hint pass. Emit a
+    // trace event so a debug-trace consumer can see the silent skip;
+    // operators correlating router-quality dips to upstream LLM
+    // health then have a clear signal.
+    traceArtifact('chat_router.local_prepass.embed_error', {
+      message: (e as Error).message ?? String(e),
+    });
     return [];
   }
   const scored: Array<{ predicateId: string; similarity: number }> = [];

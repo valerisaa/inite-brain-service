@@ -122,7 +122,10 @@ export class CollapsePatternService {
     try {
       const snap = await this.getSnapshot(companyId);
       return snap.patterns.size;
-    } catch {
+    } catch (e) {
+      this.logger.debug(
+        `collapse-pattern poolSize(${companyId}) → 0 on err: ${(e as Error).message ?? e}`,
+      );
       return 0;
     }
   }

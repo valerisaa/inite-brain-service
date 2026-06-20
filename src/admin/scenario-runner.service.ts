@@ -711,7 +711,10 @@ export class ScenarioRunnerService {
       );
       const hit = res.results.find((r) => r.externalRefs?.[refTag] === id);
       return hit?.entityId ?? null;
-    } catch {
+    } catch (e) {
+      this.logger.debug(
+        `scenario externalRef lookup failed (${refTag}=${id}): ${(e as Error).message ?? e}`,
+      );
       return null;
     }
   }

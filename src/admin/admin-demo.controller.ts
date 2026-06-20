@@ -263,9 +263,12 @@ export class AdminDemoController {
       autoDedup = r.dedup
         ? { identityLinksCreated: r.dedup.identityLinksCreated }
         : undefined;
-    } catch {
+    } catch (e) {
       // Auto-dedup is best-effort; an error here MUST NOT fail the
       // ingest. The deep sweep button will still pick it up later.
+      this.logger.debug(
+        `demo auto-dedup skipped: ${(e as Error).message ?? e}`,
+      );
       autoDedup = undefined;
     }
     return { route, ingest, autoDedup };
@@ -426,7 +429,10 @@ export class AdminDemoController {
             .filter(Boolean);
         },
       );
-    } catch {
+    } catch (e) {
+      this.logger.debug(
+        `fetchKnownEntityNames(${tenant}) returned empty: ${(e as Error).message ?? e}`,
+      );
       return [];
     }
   }
