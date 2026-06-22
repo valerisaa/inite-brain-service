@@ -1,6 +1,9 @@
 import { Injectable, Logger, NotFoundException, BadRequestException } from '@nestjs/common';
 import { Surreal, StringRecordId } from 'surrealdb';
-import { SurrealService } from '../db/surreal.service';
+import {
+  SurrealService,
+  retryOnUniqueViolation,
+} from '../db/surreal.service';
 import { policyFor } from '../ingest/conflict-resolver';
 import { BrainScope } from '../auth/api-key.types';
 import {
@@ -97,7 +100,7 @@ export class ArtifactsService {
       if (cached && !cached.dirty) {
         const ageMs = now - new Date(cached.builtAt).getTime();
         if (ageMs < cached.staleAfterMs) {
-          return this.shapeForReturn(cached, ref.full, scopes, ageMs);
+          return this.shapeForReturn(cached, ref.full, scopes, ageMs, artifactType);
         }
       }
 
@@ -116,9 +119,12 @@ export class ArtifactsService {
         compiled.payload,
         compiled.citations,
         compiled.sourceFactIds,
+        // dirty as observed before we read facts; the CAS clears it only if
+        // unchanged since (no fact-change event fired during compile).
+        cached?.dirty ?? false,
       );
       const ageMs = now - new Date(stored.builtAt).getTime();
-      return this.shapeForReturn(stored, ref.full, scopes, ageMs);
+      return this.shapeForReturn(stored, ref.full, scopes, ageMs, artifactType);
     });
   }
 
@@ -138,6 +144,9 @@ export class ArtifactsService {
       if (!(entRows as any[])?.[0]) {
         throw new NotFoundException(`Entity ${entityIdRaw} not found`);
       }
+      // Observe dirty BEFORE reading facts so the CAS in upsertArtifact can
+      // tell whether a fact-change event fired mid-compile and preserve it.
+      const before = await this.fetchCached(db, ref.id, artifactType);
       const facts = await this.fetchActiveFacts(db, ref.id, scopes);
       const compiled = this.compile(artifactType, facts);
       const stored = await this.upsertArtifact(
@@ -147,8 +156,9 @@ export class ArtifactsService {
         compiled.payload,
         compiled.citations,
         compiled.sourceFactIds,
+        before?.dirty ?? false,
       );
-      return this.shapeForReturn(stored, ref.full, scopes, 0);
+      return this.shapeForReturn(stored, ref.full, scopes, 0, artifactType);
     });
   }
 
@@ -248,6 +258,7 @@ export class ArtifactsService {
     payload: Record<string, unknown>,
     citations: KnowledgeArtifact['citations'],
     sourceFactIds: string[],
+    expectedDirty: boolean,
   ) {
     // Wrap payload + citations together so they round-trip as a single
     // FLEXIBLE object — schema has one `payload` field, no need for
@@ -259,24 +270,36 @@ export class ArtifactsService {
     // matched the predicate, fall through to CREATE. This is the
     // documented v2 idiom in lieu of a true UPSERT keyword on a
     // composite-key uniqueness pattern.
-    const [updRows] = await db.query<any[][]>(
-      `UPDATE knowledge_artifact
-       SET payload = $wrapped,
-           sourceFactIds = $facts,
-           builtAt = time::now(),
-           dirty = false
-       WHERE entityId = type::thing('knowledge_entity', $rid)
-         AND artifactType = $type
-       RETURN AFTER`,
-      {
-        rid,
-        type: artifactType,
-        wrapped,
-        facts: factRecords,
-      },
-    );
-    let row = ((updRows as any[]) ?? [])[0];
-    if (!row) {
+    // Wrap in retryOnUniqueViolation: two concurrent cold reads both miss
+    // the UPDATE and both CREATE → one hits the (entityId, artifactType)
+    // UNIQUE index. On retry the UPDATE now finds the winner's row.
+    const row = await retryOnUniqueViolation(async () => {
+      const [updRows] = await db.query<any[][]>(
+        // CAS on dirty: clear it only if the flag still matches what we
+        // observed before reading facts. migration 0004 defines a DB EVENT
+        // that flips dirty=true whenever a relevant fact changes, so a fact
+        // landing DURING our compile would otherwise be clobbered back to
+        // dirty=false — serving a stale artifact marked clean. When the
+        // current dirty differs from $expectedDirty, the event fired mid-
+        // compile, so we leave dirty=true and the next read recompiles.
+        `UPDATE knowledge_artifact
+         SET payload = $wrapped,
+             sourceFactIds = $facts,
+             builtAt = time::now(),
+             dirty = IF dirty = $expectedDirty THEN false ELSE dirty END
+         WHERE entityId = type::thing('knowledge_entity', $rid)
+           AND artifactType = $type
+         RETURN AFTER`,
+        {
+          rid,
+          type: artifactType,
+          wrapped,
+          facts: factRecords,
+          expectedDirty,
+        },
+      );
+      const updated = ((updRows as any[]) ?? [])[0];
+      if (updated) return updated;
       const [creRows] = await db.query<any[][]>(
         `CREATE knowledge_artifact CONTENT {
             entityId: type::thing('knowledge_entity', $rid),
@@ -285,22 +308,19 @@ export class ArtifactsService {
             sourceFactIds: $facts,
             dirty: false
          } RETURN AFTER`,
-        {
-          rid,
-          type: artifactType,
-          wrapped,
-          facts: factRecords,
-        },
+        { rid, type: artifactType, wrapped, facts: factRecords },
       );
-      row = ((creRows as any[]) ?? [])[0];
-    }
+      return ((creRows as any[]) ?? [])[0];
+    });
     return {
       payload,
       citations,
       sourceFactIds,
       builtAt: row.builtAt,
       staleAfterMs: row.staleAfterMs ?? 300_000,
-      dirty: false,
+      // Reflect the persisted flag: the CAS above may have left dirty=true
+      // if a fact-change event fired during compile (CREATE always clean).
+      dirty: !!row.dirty,
     };
   }
 
@@ -315,6 +335,7 @@ export class ArtifactsService {
     fullSelf: string,
     scopes: BrainScope[],
     ageMs: number,
+    artifactType: ArtifactType,
   ): KnowledgeArtifact {
     // PII filter on the COMPILED payload — drop fields whose source
     // predicates require a scope the caller doesn't carry. The
@@ -350,7 +371,7 @@ export class ArtifactsService {
     return {
       artifactId: `knowledge_artifact:${fullSelf.replace('knowledge_entity:', '')}::${cached.sourceFactIds.length}`,
       entityId: fullSelf,
-      artifactType: 'customer_profile' as ArtifactType,
+      artifactType,
       payload: filteredPayload,
       citations: filteredCitations,
       builtAt: new Date(cached.builtAt).toISOString(),
