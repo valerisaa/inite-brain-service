@@ -554,6 +554,18 @@ export class CalibrationRefitService implements OnModuleInit {
  * not retracted as a supersede within the gold window. The 30-day
  * window matches the FaithfulRAG bootstrap recipe — retractions
  * beyond that fold into noise.
+ *
+ * SURVIVORSHIP BIAS (intentional, documented): the final `return true`
+ * means a fact that was never retracted or superseded counts as correct
+ * even though nobody actively VALIDATED it — silence is read as success.
+ * This skews calibration optimistic, since the negatives are only the
+ * facts the system later overturned, not every fact that was wrong-but-
+ * unchallenged. We keep it deliberately: it mirrors the FaithfulRAG
+ * weak-supervision recipe (overturned == incorrect, survived == correct),
+ * and the alternative (default false) would label the large unvalidated
+ * majority as wrong and collapse the calibration map toward 0. Revisit if
+ * an explicit human-verification signal becomes available to ground the
+ * positives instead of inferring them from non-retraction.
  */
 export function isCorrect(row: {
   status: string;
