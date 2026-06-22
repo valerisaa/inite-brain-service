@@ -26,6 +26,12 @@ import type { BaselinesResponse } from '../contracts/admin/baselines.schema';
 import type { TracesResponse } from '../contracts/admin/traces.schema';
 import type { ScenarioDetailResponse } from '../contracts/admin/scenario-detail.schema';
 import type { TraceDetailResponse } from '../contracts/admin/trace-detail.schema';
+import type {
+  ScenarioRunOutcomeResponse,
+  ScenariosBatchResponse,
+  BaselineSaveResponse,
+  BaselineDiffResponse,
+} from '../contracts/admin/write-responses.schema';
 
 /**
  * Operator-facing eval and observability surface — scenarios, baselines,
@@ -69,10 +75,11 @@ export class AdminEvalController {
   async runScenario(
     @Param('id') id: string,
     @Body() body: { keepTenant?: boolean },
-  ) {
-    return this.scenarios.runOne(id, {
+  ): Promise<ScenarioRunOutcomeResponse> {
+    const outcome = await this.scenarios.runOne(id, {
       keepTenant: body?.keepTenant === true,
     });
+    return outcome as unknown as ScenarioRunOutcomeResponse;
   }
 
   /**
@@ -86,7 +93,7 @@ export class AdminEvalController {
   async runBatch(
     @Body()
     body: { ids?: string[]; vertical?: string; keepTenant?: boolean },
-  ) {
+  ): Promise<ScenariosBatchResponse> {
     const BATCH_CAP = 10;
     const all = this.scenarios.list();
     const candidate = body.ids?.length
@@ -142,7 +149,7 @@ export class AdminEvalController {
         });
       }
     }
-    return { outcomes };
+    return { outcomes } as unknown as ScenariosBatchResponse;
   }
 
   // ── Baselines ────────────────────────────────────────────────────
@@ -158,13 +165,16 @@ export class AdminEvalController {
   async saveBaseline(
     @Param('name') name: string,
     @Body() body: { outcomes: ScenarioRunOutcome[] },
-  ) {
+  ): Promise<BaselineSaveResponse> {
     if (!body?.outcomes?.length) {
       throw new BadRequestException(
         'outcomes[] required and must be non-empty',
       );
     }
-    return this.baselines.save(name, body.outcomes);
+    return (await this.baselines.save(
+      name,
+      body.outcomes,
+    )) satisfies BaselineSaveResponse;
   }
 
   @Post('baselines/:name/diff')
@@ -172,8 +182,11 @@ export class AdminEvalController {
   async diffBaseline(
     @Param('name') name: string,
     @Body() body: { outcomes: ScenarioRunOutcome[] },
-  ) {
-    return this.baselines.diff(name, body?.outcomes ?? []);
+  ): Promise<BaselineDiffResponse> {
+    return (await this.baselines.diff(
+      name,
+      body?.outcomes ?? [],
+    )) satisfies BaselineDiffResponse;
   }
 
   // ── Traces ───────────────────────────────────────────────────────

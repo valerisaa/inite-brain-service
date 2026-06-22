@@ -19,6 +19,7 @@ import type { ForgottenResponse } from '../contracts/admin/forgotten.schema';
 import type { OperatorActionsResponse } from '../contracts/admin/operator-actions.schema';
 import type { PiiInventoryResponse } from '../contracts/admin/pii.schema';
 import type { ConfigResponse } from '../contracts/admin/config.schema';
+import type { DlqDeleteResponse } from '../contracts/admin/write-responses.schema';
 
 /**
  * Operator power-tools / GDPR surface.
@@ -74,9 +75,9 @@ export class AdminOpsController {
   async dlqDelete(
     @Param('companyId') companyId: string,
     @Param('id') id: string,
-  ) {
+  ): Promise<DlqDeleteResponse> {
     const deleted = await this.admin.deleteDeadLetter(companyId, id);
-    return { deleted };
+    return { deleted } satisfies DlqDeleteResponse;
   }
 
   // ── Forgotten ─────────────────────────────────────────────

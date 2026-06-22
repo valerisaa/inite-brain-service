@@ -18,6 +18,10 @@ import {
   PredicateDefinition,
 } from '../ai/predicate-registry.service';
 import type { PredicatesListResponse } from '../contracts/admin/predicates.schema';
+import type {
+  PredicateMutationResponse,
+  PredicateDeprecateResponse,
+} from '../contracts/admin/write-responses.schema';
 
 /**
  * Operator-facing CRUD for the per-tenant predicate vocabulary. Adding
@@ -54,7 +58,7 @@ export class AdminPredicatesController {
       semantics: 'append_only' | 'single_active' | 'bitemporal';
       piiClass: 'none' | 'identifier' | 'behavioral' | 'text' | 'sensitive';
     },
-  ) {
+  ): Promise<PredicateMutationResponse> {
     if (!body?.predicateId?.trim()) {
       throw new BadRequestException('predicateId is required');
     }
@@ -67,7 +71,7 @@ export class AdminPredicatesController {
       req.brainAuth.companyId,
       body,
     );
-    return { predicate: created };
+    return { predicate: created } satisfies PredicateMutationResponse;
   }
 
   @Patch(':predicateId')
@@ -77,7 +81,7 @@ export class AdminPredicatesController {
     @Param('predicateId') predicateId: string,
     @Body()
     patch: Partial<Omit<PredicateDefinition, 'predicateId' | 'createdBy'>>,
-  ) {
+  ): Promise<PredicateMutationResponse> {
     const updated = await this.predicateRegistry.update(
       req.brainAuth.companyId,
       predicateId,
@@ -86,7 +90,7 @@ export class AdminPredicatesController {
     if (!updated) {
       throw new NotFoundException(`Predicate ${predicateId} not found`);
     }
-    return { predicate: updated };
+    return { predicate: updated } satisfies PredicateMutationResponse;
   }
 
   @Delete(':predicateId')
@@ -94,7 +98,7 @@ export class AdminPredicatesController {
   async deprecate(
     @Req() req: AuthenticatedRequest,
     @Param('predicateId') predicateId: string,
-  ) {
+  ): Promise<PredicateDeprecateResponse> {
     const ok = await this.predicateRegistry.deprecate(
       req.brainAuth.companyId,
       predicateId,
@@ -102,7 +106,7 @@ export class AdminPredicatesController {
     if (!ok) {
       throw new NotFoundException(`Predicate ${predicateId} not found`);
     }
-    return { deprecated: predicateId };
+    return { deprecated: predicateId } satisfies PredicateDeprecateResponse;
   }
 
   @Post(':predicateId/promote')
@@ -110,7 +114,7 @@ export class AdminPredicatesController {
   async promote(
     @Req() req: AuthenticatedRequest,
     @Param('predicateId') predicateId: string,
-  ) {
+  ): Promise<PredicateMutationResponse> {
     const result = await this.predicateRegistry.promote(
       req.brainAuth.companyId,
       predicateId,
@@ -118,7 +122,7 @@ export class AdminPredicatesController {
     if (!result) {
       throw new NotFoundException(`Predicate ${predicateId} not found`);
     }
-    return { predicate: result };
+    return { predicate: result } satisfies PredicateMutationResponse;
   }
 
   @Post(':predicateId/alias')
@@ -127,7 +131,7 @@ export class AdminPredicatesController {
     @Req() req: AuthenticatedRequest,
     @Param('predicateId') predicateId: string,
     @Body() body: { canonicalId: string },
-  ) {
+  ): Promise<PredicateMutationResponse> {
     if (!body?.canonicalId?.trim()) {
       throw new BadRequestException('canonicalId is required');
     }
@@ -139,6 +143,6 @@ export class AdminPredicatesController {
     if (!result) {
       throw new NotFoundException(`Predicate ${predicateId} not found`);
     }
-    return { predicate: result };
+    return { predicate: result } satisfies PredicateMutationResponse;
   }
 }

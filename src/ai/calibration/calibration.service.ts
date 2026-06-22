@@ -114,7 +114,7 @@ export class CalibrationService implements OnModuleInit {
            FROM calibration_table
            WHERE extractorModel = $m AND promptHash = $p
            ORDER BY version DESC LIMIT 1`,
-        { m: this.extractorModel, p: promptHashOf('bootstrap') },
+        { m: this.extractorModel, p: BOOTSTRAP_PROMPT_HASH },
       );
       const row = (rows as Array<{
         thresholds: number[];
@@ -195,6 +195,17 @@ function cacheKey(extractorModel: string, promptHash: string): string {
 }
 
 /** Stable hash for cache keys + DB rows. Hex digest of SHA-256. */
-function promptHashOf(text: string): string {
+export function promptHashOf(text: string): string {
   return createHash('sha256').update(text).digest('hex').slice(0, 16);
 }
+
+/**
+ * Canonical key for the shared "bootstrap" calibration row. MUST be
+ * identical on the write side (calibration-refit.service persist) and
+ * the read side (this service's boot loader + runtime calibrate()).
+ * They diverged once — the refit wrote the literal `'bootstrap'` while
+ * the loader queried `promptHashOf('bootstrap')`, so persisted nightly
+ * refits were never reloaded after a restart. Both now import this.
+ */
+export const BOOTSTRAP_PROMPT_KEY = 'bootstrap';
+export const BOOTSTRAP_PROMPT_HASH = promptHashOf(BOOTSTRAP_PROMPT_KEY);

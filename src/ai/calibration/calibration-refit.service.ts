@@ -8,7 +8,10 @@ import {
   type CalibrationPair,
   type CalibrationMap,
 } from './isotonic';
-import { CalibrationService } from './calibration.service';
+import {
+  CalibrationService,
+  BOOTSTRAP_PROMPT_HASH,
+} from './calibration.service';
 import { JobRunService } from '../../jobs/job-run.service';
 import { JobClaimService } from '../../jobs/job-claim.service';
 import { WorkerLoopService } from '../../jobs/worker-loop.service';
@@ -47,7 +50,10 @@ export class CalibrationRefitService implements OnModuleInit {
   private readonly logger = new Logger(CalibrationRefitService.name);
   private readonly enabled: boolean;
   private readonly extractorModel: string;
-  private readonly bootstrapPromptKey = 'bootstrap';
+  // Canonical hashed key shared with CalibrationService — see
+  // BOOTSTRAP_PROMPT_HASH. Persisting under the literal 'bootstrap' while
+  // the loader read the hash meant nightly refits never reloaded on boot.
+  private readonly bootstrapPromptKey = BOOTSTRAP_PROMPT_HASH;
   /**
    * Two sub-jobs (source-trust at 03:42, calibration at 03:51) share
    * one guard so the second tick can't start while the first is still

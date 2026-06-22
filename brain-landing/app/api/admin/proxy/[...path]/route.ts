@@ -28,63 +28,142 @@ import { DreamsEmitsResponseSchema } from '@/lib/contracts/admin-dreams-emits'
 import { TraceDetailResponseSchema } from '@/lib/contracts/admin-trace-detail'
 import { ScenarioDetailResponseSchema } from '@/lib/contracts/admin-scenario-detail'
 import { JobRowSchema } from '@/lib/contracts/admin-jobs'
+import {
+  DropTenantResponseSchema,
+  DlqDeleteResponseSchema,
+  PredicateDeprecateResponseSchema,
+  JobCancelResponseSchema,
+  AcceptedDreamsResponseSchema,
+  AcceptedCompactionResponseSchema,
+  AcceptedCalibrationRefitResponseSchema,
+  AcceptedReindexResponseSchema,
+  AcceptedScenariosBatchResponseSchema,
+  ChangefeedDrainResponseSchema,
+  PredicateMutationResponseSchema,
+  DreamsRunResponseSchema,
+  ReindexRunResponseSchema,
+  ScenarioRunOutcomeSchema,
+  ScenariosBatchResponseSchema,
+  BaselineSaveResponseSchema,
+  BaselineDiffResponseSchema,
+} from '@/lib/contracts/admin-write-responses'
 import type { ZodType } from 'zod'
 
 /**
  * Boundary parse for endpoints we have wire contracts for. Match by
- * exact subpath. If the upstream payload no longer satisfies the
+ * method + subpath. If the upstream payload no longer satisfies the
  * schema, we 502 with the issue list — that's the whole point of G2:
  * silent drift becomes a loud failure visible to the operator instead
  * of a stale field on a panel nobody notices.
  *
- * The map is intentionally tiny — adding a new endpoint requires
+ * Maps are intentionally tight — adding a new endpoint requires
  * shipping a schema first.
  */
-const RESPONSE_SCHEMAS: Record<string, ZodType> = {
-  'v1/admin/leases': LeasesResponseSchema,
-  'v1/admin/scheduler': SchedulerResponseSchema,
-  'v1/admin/changefeed/state': ChangefeedStateResponseSchema,
-  'v1/admin/jobs': JobsListResponseSchema,
-  'v1/admin/overview': OverviewResponseSchema,
-  'v1/admin/audit': AuditPageResponseSchema,
-  'v1/admin/dlq': DlqResponseSchema,
-  'v1/admin/forgotten': ForgottenResponseSchema,
-  'v1/admin/operator-actions': OperatorActionsResponseSchema,
-  'v1/admin/migrations': MigrationsResponseSchema,
-  'v1/admin/throttler': ThrottlerResponseSchema,
-  'v1/admin/now': NowResponseSchema,
-  'v1/admin/health/components': HealthComponentsResponseSchema,
-  'v1/admin/pii': PiiInventoryResponseSchema,
-  'v1/admin/config': ConfigResponseSchema,
-  'v1/admin/cost': CostResponseSchema,
-  'v1/admin/calibration': CalibrationResponseSchema,
-  'v1/admin/router/stats': RouterStatsResponseSchema,
-  'v1/admin/predicates': PredicatesListResponseSchema,
-  'v1/admin/scenarios': ScenariosResponseSchema,
-  'v1/admin/baselines': BaselinesResponseSchema,
-  'v1/admin/traces': TracesResponseSchema,
-  'v1/admin/dreams/summary': DreamsSummaryResponseSchema,
+
+type HttpMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE'
+
+const RESPONSE_SCHEMAS: Partial<
+  Record<HttpMethod, Record<string, ZodType>>
+> = {
+  GET: {
+    'v1/admin/leases': LeasesResponseSchema,
+    'v1/admin/scheduler': SchedulerResponseSchema,
+    'v1/admin/changefeed/state': ChangefeedStateResponseSchema,
+    'v1/admin/jobs': JobsListResponseSchema,
+    'v1/admin/overview': OverviewResponseSchema,
+    'v1/admin/audit': AuditPageResponseSchema,
+    'v1/admin/dlq': DlqResponseSchema,
+    'v1/admin/forgotten': ForgottenResponseSchema,
+    'v1/admin/operator-actions': OperatorActionsResponseSchema,
+    'v1/admin/migrations': MigrationsResponseSchema,
+    'v1/admin/throttler': ThrottlerResponseSchema,
+    'v1/admin/now': NowResponseSchema,
+    'v1/admin/health/components': HealthComponentsResponseSchema,
+    'v1/admin/pii': PiiInventoryResponseSchema,
+    'v1/admin/config': ConfigResponseSchema,
+    'v1/admin/cost': CostResponseSchema,
+    'v1/admin/calibration': CalibrationResponseSchema,
+    'v1/admin/router/stats': RouterStatsResponseSchema,
+    'v1/admin/predicates': PredicatesListResponseSchema,
+    'v1/admin/scenarios': ScenariosResponseSchema,
+    'v1/admin/baselines': BaselinesResponseSchema,
+    'v1/admin/traces': TracesResponseSchema,
+    'v1/admin/dreams/summary': DreamsSummaryResponseSchema,
+  },
+  POST: {
+    'v1/admin/dreams/run': DreamsRunResponseSchema,
+    'v1/admin/reindex/embeddings': ReindexRunResponseSchema,
+    'v1/admin/maintenance/dreams/run': AcceptedDreamsResponseSchema,
+    'v1/admin/maintenance/compaction': AcceptedCompactionResponseSchema,
+    'v1/admin/maintenance/calibration-refit':
+      AcceptedCalibrationRefitResponseSchema,
+    'v1/admin/maintenance/reindex': AcceptedReindexResponseSchema,
+    'v1/admin/maintenance/scenarios/batch':
+      AcceptedScenariosBatchResponseSchema,
+    'v1/admin/changefeed/drain': ChangefeedDrainResponseSchema,
+    'v1/admin/scenarios/run-batch': ScenariosBatchResponseSchema,
+    'v1/admin/predicates': PredicateMutationResponseSchema,
+  },
+  PATCH: {},
+  DELETE: {},
 }
 
 /**
- * Dynamic-path response schemas — paths with :params (e.g.
- * /jobs/:runId). Patterns are matched against subpath in order;
- * first match wins. Each pattern uses `:placeholder` syntax that
- * expands to a single non-slash segment. Express-style; deliberately
- * simple — no wildcard or regex inside placeholders.
+ * Dynamic-path schemas — paths with :params (e.g. /jobs/:runId).
+ * Patterns use `:placeholder` syntax that expands to a single
+ * non-slash segment. Express-style; deliberately simple — no
+ * wildcard or regex inside placeholders.
  */
-const DYNAMIC_RESPONSE_SCHEMAS: Array<{
-  pattern: string
-  schema: ZodType
-}> = [
-  { pattern: 'v1/admin/jobs/:runId', schema: JobRowSchema },
-  { pattern: 'v1/admin/scenarios/:id', schema: ScenarioDetailResponseSchema },
-  { pattern: 'v1/admin/traces/:requestId', schema: TraceDetailResponseSchema },
-  {
-    pattern: 'v1/admin/dreams/runs/:runId/emits',
-    schema: DreamsEmitsResponseSchema,
-  },
-]
+const DYNAMIC_RESPONSE_SCHEMAS: Partial<
+  Record<HttpMethod, Array<{ pattern: string; schema: ZodType }>>
+> = {
+  GET: [
+    { pattern: 'v1/admin/jobs/:runId', schema: JobRowSchema },
+    { pattern: 'v1/admin/scenarios/:id', schema: ScenarioDetailResponseSchema },
+    {
+      pattern: 'v1/admin/traces/:requestId',
+      schema: TraceDetailResponseSchema,
+    },
+    {
+      pattern: 'v1/admin/dreams/runs/:runId/emits',
+      schema: DreamsEmitsResponseSchema,
+    },
+  ],
+  POST: [
+    { pattern: 'v1/admin/jobs/:runId/cancel', schema: JobCancelResponseSchema },
+    {
+      pattern: 'v1/admin/scenarios/:id/run',
+      schema: ScenarioRunOutcomeSchema,
+    },
+    { pattern: 'v1/admin/baselines/:name', schema: BaselineSaveResponseSchema },
+    {
+      pattern: 'v1/admin/baselines/:name/diff',
+      schema: BaselineDiffResponseSchema,
+    },
+    {
+      pattern: 'v1/admin/predicates/:predicateId/promote',
+      schema: PredicateMutationResponseSchema,
+    },
+    {
+      pattern: 'v1/admin/predicates/:predicateId/alias',
+      schema: PredicateMutationResponseSchema,
+    },
+  ],
+  PATCH: [
+    {
+      pattern: 'v1/admin/predicates/:predicateId',
+      schema: PredicateMutationResponseSchema,
+    },
+  ],
+  DELETE: [
+    { pattern: 'v1/admin/tenants/:companyId', schema: DropTenantResponseSchema },
+    { pattern: 'v1/admin/dlq/:companyId/:id', schema: DlqDeleteResponseSchema },
+    {
+      pattern: 'v1/admin/predicates/:predicateId',
+      schema: PredicateDeprecateResponseSchema,
+    },
+  ],
+}
 
 function placeholderToRegex(pattern: string): RegExp {
   const escaped = pattern
@@ -96,15 +175,24 @@ function placeholderToRegex(pattern: string): RegExp {
   return new RegExp(`^${escaped}$`)
 }
 
-const DYNAMIC_SCHEMAS_COMPILED = DYNAMIC_RESPONSE_SCHEMAS.map((entry) => ({
-  re: placeholderToRegex(entry.pattern),
-  schema: entry.schema,
-}))
+const DYNAMIC_SCHEMAS_COMPILED: Partial<
+  Record<HttpMethod, Array<{ re: RegExp; schema: ZodType }>>
+> = Object.fromEntries(
+  (Object.entries(DYNAMIC_RESPONSE_SCHEMAS) as Array<
+    [HttpMethod, Array<{ pattern: string; schema: ZodType }>]
+  >).map(([method, entries]) => [
+    method,
+    entries.map((e) => ({ re: placeholderToRegex(e.pattern), schema: e.schema })),
+  ]),
+) as Partial<Record<HttpMethod, Array<{ re: RegExp; schema: ZodType }>>>
 
-function findSchema(subpath: string): ZodType | undefined {
-  const exact = RESPONSE_SCHEMAS[subpath]
+function findSchema(method: string, subpath: string): ZodType | undefined {
+  const m = method.toUpperCase() as HttpMethod
+  const exact = RESPONSE_SCHEMAS[m]?.[subpath]
   if (exact) return exact
-  for (const { re, schema } of DYNAMIC_SCHEMAS_COMPILED) {
+  const dyn = DYNAMIC_SCHEMAS_COMPILED[m]
+  if (!dyn) return undefined
+  for (const { re, schema } of dyn) {
     if (re.test(subpath)) return schema
   }
   return undefined
@@ -209,8 +297,7 @@ async function forward(
     headers: debug ? { 'X-Brain-Debug': '1' } : undefined,
   })
 
-  const schema =
-    request.method === 'GET' && res.ok ? findSchema(subpath) : undefined
+  const schema = res.ok ? findSchema(request.method, subpath) : undefined
   if (schema) {
     const parsed = schema.safeParse(res.data)
     if (!parsed.success) {

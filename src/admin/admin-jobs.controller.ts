@@ -47,6 +47,15 @@ import type {
 } from '../contracts/admin/jobs.schema';
 import type { DreamsSummaryResponse } from '../contracts/admin/dreams-summary.schema';
 import type { DreamsEmitsResponse } from '../contracts/admin/dreams-emits.schema';
+import type {
+  JobCancelResponse,
+  AcceptedDreamsResponse,
+  AcceptedCompactionResponse,
+  AcceptedCalibrationRefitResponse,
+  AcceptedReindexResponse,
+  AcceptedScenariosBatchResponse,
+  ChangefeedDrainResponse,
+} from '../contracts/admin/write-responses.schema';
 
 /**
  * Scheduler / jobs / maintenance surface.
@@ -128,9 +137,9 @@ export class AdminJobsController {
   async cancelJob(
     @Req() req: AuthenticatedRequest,
     @Param('runId') runId: string,
-  ) {
+  ): Promise<JobCancelResponse> {
     const ok = await this.jobs.requestCancel(runId, req.brainAuth.companyId);
-    return { cancelRequested: ok };
+    return { cancelRequested: ok } satisfies JobCancelResponse;
   }
 
   /**
@@ -229,7 +238,7 @@ export class AdminJobsController {
   triggerDreams(
     @Req() req: AuthenticatedRequest,
     @Body() body: { operations?: ('dedup' | 'resolve' | 'summarize')[] } = {},
-  ): { accepted: true; jobType: 'dreams'; companyId: string } {
+  ): AcceptedDreamsResponse {
     void this.dreams
       .runForTenant(
         req.brainAuth.companyId,
@@ -246,7 +255,7 @@ export class AdminJobsController {
       accepted: true,
       jobType: 'dreams',
       companyId: req.brainAuth.companyId,
-    };
+    } satisfies AcceptedDreamsResponse;
   }
 
   /**
@@ -263,7 +272,7 @@ export class AdminJobsController {
   triggerCompaction(
     @Req() req: AuthenticatedRequest,
     @Body() body: { companyId?: string } = {},
-  ): { accepted: true; jobType: 'compaction'; tenants: string[] } {
+  ): AcceptedCompactionResponse {
     const target = body.companyId
       ? [body.companyId]
       : this.apiKeys.knownCompanyIds();
@@ -279,7 +288,11 @@ export class AdminJobsController {
       }
     })();
     void req;
-    return { accepted: true, jobType: 'compaction', tenants: target };
+    return {
+      accepted: true,
+      jobType: 'compaction',
+      tenants: target,
+    } satisfies AcceptedCompactionResponse;
   }
 
   @Post('maintenance/calibration-refit')
@@ -287,7 +300,7 @@ export class AdminJobsController {
   @RequireScopes('brain:admin')
   triggerCalibrationRefit(
     @Req() req: AuthenticatedRequest,
-  ): { accepted: true; jobs: string[] } {
+  ): AcceptedCalibrationRefitResponse {
     const trigger = {
       triggeredBy: 'manual' as const,
       triggeredByActor: req.brainAuth.companyId,
@@ -297,7 +310,7 @@ export class AdminJobsController {
     return {
       accepted: true,
       jobs: ['calibration_refit', 'source_trust_refit'],
-    };
+    } satisfies AcceptedCalibrationRefitResponse;
   }
 
   /**
@@ -314,7 +327,7 @@ export class AdminJobsController {
     @Req() req: AuthenticatedRequest,
     @Body()
     body: { tenant?: string; dryRun?: boolean; maxFacts?: number } = {},
-  ): Promise<{ accepted: true; runId: string }> {
+  ): Promise<AcceptedReindexResponse> {
     const tenants = this.apiKeys.knownCompanyIds();
     const hostTenant = body.tenant?.trim() || tenants[0];
     const row = await this.jobs.start({
@@ -346,7 +359,10 @@ export class AdminJobsController {
         });
       }
     })();
-    return { accepted: true, runId: row.runId };
+    return {
+      accepted: true,
+      runId: row.runId,
+    } satisfies AcceptedReindexResponse;
   }
 
   /**
@@ -366,7 +382,7 @@ export class AdminJobsController {
       vertical?: string;
       keepTenant?: boolean;
     } = {},
-  ): Promise<{ accepted: true; runId: string; scenarioCount: number }> {
+  ): Promise<AcceptedScenariosBatchResponse> {
     const all = this.scenarios.list();
     const candidates = body.ids?.length
       ? body.ids
@@ -433,7 +449,7 @@ export class AdminJobsController {
       accepted: true,
       runId: row.runId,
       scenarioCount: candidates.length,
-    };
+    } satisfies AcceptedScenariosBatchResponse;
   }
 
   /**
@@ -593,7 +609,7 @@ export class AdminJobsController {
 
   @Post('changefeed/drain')
   @RequireScopes('brain:admin')
-  async drainChangefeed() {
-    return this.changefeed.drainNow();
+  async drainChangefeed(): Promise<ChangefeedDrainResponse> {
+    return (await this.changefeed.drainNow()) satisfies ChangefeedDrainResponse;
   }
 }

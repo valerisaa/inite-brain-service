@@ -32,6 +32,11 @@ import type { AuditPageResponse } from '../contracts/admin/audit-page.schema';
 import type { CostResponse } from '../contracts/admin/cost.schema';
 import type { CalibrationResponse } from '../contracts/admin/calibration.schema';
 import type { RouterStatsResponse } from '../contracts/admin/router-stats.schema';
+import type {
+  DropTenantResponse,
+  DreamsRunResponse,
+  ReindexRunResponse,
+} from '../contracts/admin/write-responses.schema';
 
 /**
  * Operator-facing core admin endpoints — overview, hybrid-router
@@ -139,11 +144,11 @@ export class AdminController {
   async runDreams(
     @Req() req: AuthenticatedRequest,
     @Body() body: RunDreamsDto,
-  ) {
-    return this.dreams.runForTenant(
+  ): Promise<DreamsRunResponse> {
+    return (await this.dreams.runForTenant(
       req.brainAuth.companyId,
       body.operations ?? ['dedup', 'resolve'],
-    );
+    )) satisfies DreamsRunResponse;
   }
 
   /**
@@ -170,16 +175,16 @@ export class AdminController {
     @Query('tenant') tenant?: string,
     @Query('dryRun') dryRun?: string,
     @Query('maxFacts') maxFacts?: string,
-  ) {
+  ): Promise<ReindexRunResponse> {
     const parsedMaxFacts = maxFacts ? parseInt(maxFacts, 10) : undefined;
-    return this.reindex.run({
+    return (await this.reindex.run({
       tenant: tenant?.trim() || undefined,
       dryRun: dryRun === 'true',
       maxFacts:
         parsedMaxFacts !== undefined && Number.isFinite(parsedMaxFacts)
           ? parsedMaxFacts
           : undefined,
-    });
+    })) satisfies ReindexRunResponse;
   }
 
   /**
@@ -281,13 +286,15 @@ export class AdminController {
 
   @Delete('tenants/:companyId')
   @RequireScopes('brain:admin')
-  async dropTenant(@Param('companyId') companyId: string) {
+  async dropTenant(
+    @Param('companyId') companyId: string,
+  ): Promise<DropTenantResponse> {
     if (!companyId.startsWith('eval_')) {
       throw new ForbiddenException(
         `Only ephemeral eval_* tenants can be dropped via admin API`,
       );
     }
     await this.surreal.dropCompanyDatabase(companyId);
-    return { dropped: companyId };
+    return { dropped: companyId } satisfies DropTenantResponse;
   }
 }
