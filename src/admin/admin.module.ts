@@ -7,6 +7,7 @@ import { SearchModule } from '../search/search.module';
 import { FactsModule } from '../facts/facts.module';
 import { EntitiesModule } from '../entities/entities.module';
 import { AuditModule } from '../audit/audit.module';
+import { CompactionModule } from '../compaction/compaction.module';
 import { AdminController } from './admin.controller';
 import { AdminDemoController } from './admin-demo.controller';
 import { AdminEvalController } from './admin-eval.controller';
@@ -36,6 +37,11 @@ import { ConfigInspectorService } from './config-inspector.service';
     FactsModule,
     EntitiesModule,
     AuditModule,
+    // AdminJobsController injects CompactionService for the
+    // /admin/maintenance/compaction trigger. CompactionModule isn't
+    // @Global, so without this import Nest fails to resolve the
+    // controller and the whole app refuses to boot.
+    CompactionModule,
   ],
   controllers: [
     AdminController,
