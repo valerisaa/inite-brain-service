@@ -58,16 +58,29 @@ All v1 endpoints are live; MCP transport is mounted per tenant.
 | `POST /v1/entities/:id/forget` | hard GDPR cascade — facts + edges + embeddings deleted, HMAC tombstone retained |
 | `GET /v1/artifacts/:type/:entityId` | derived artifacts (profile / digest / etc) with manual `recompile` POST |
 | `POST /v1/dreams/run` | off-hours self-improvement: dedup / resolve / summarize (admin scope) |
+| `GET /v1/admin/jobs` | list job_run rows (filter by jobType / status / since / companyId) |
+| `GET /v1/admin/jobs/:runId` | single job_run detail |
+| `POST /v1/admin/jobs/:runId/cancel` | flip `cancelRequested=true` — worker loop aborts on next renew tick |
+| `GET /v1/admin/jobs/stream` | SSE stream of job_run transitions for live dashboard |
+| `GET /v1/admin/leases` | leader_lease snapshot + active claims across tenants (Phase J cockpit) |
+| `GET /v1/admin/scheduler` | registered cron entries with last/next fire timestamps |
+| `POST /v1/admin/maintenance/dreams/run` | async kick of dreams (returns runId) |
+| `POST /v1/admin/maintenance/calibration-refit` | async kick of calibration + source-trust refit |
+| `POST /v1/admin/maintenance/reindex` | async re-embed knowledge_fact, optionally per tenant |
+| `GET /v1/admin/changefeed/state` | consumer lag + per-(tenant, source) cursor table |
+| `POST /v1/admin/changefeed/drain` | manual drain of pending change events |
 | `ALL /mcp/:companyId` | Streamable HTTP MCP endpoint per tenant |
 
 ## Tech stack
 
-- **NestJS 11** + TypeScript on Node 22-alpine; OTel auto-instrumentation
+- **NestJS 11** + TypeScript on Node 22-slim (Debian — `onnxruntime-node` needs glibc, see `Dockerfile`); OTel auto-instrumentation
 - **SurrealDB 2.3.10** with HNSW vector index + BM25 search analyzer + bitemporal model
-  - Tenancy: namespace `inite`, database `co_<companyId>` per tenant (per-tenant data isolation, single `REMOVE DATABASE` to forget)
+  - Tenancy: namespace `inite` (prod), database `co_<companyId>` per tenant — per-tenant data isolation, single `REMOVE DATABASE` to forget. Plus `DB=system` for global state (leader_lease).
   - DB-level PII fence via PERMISSIONS + `$caller_scopes`, scoped pool signs in as `brain_caller` editor user
-- **OpenAI** `gpt-4o-mini-2024-07-18` (snapshot-pinned) for extraction / synthesize / faithfulness verifier; `text-embedding-3-small` (1536d) for vectors
+- **BGE-M3** (`@xenova/transformers`, ~150MB ONNX, multilingual, 1024d) as the default embedder (`EMBEDDER_PROVIDER=bge-m3`) — runs in a dedicated `worker_thread` so a 20-200ms inference doesn't freeze the main event loop. Fallback: OpenAI `text-embedding-3-small` (1536d).
+- **OpenAI** `gpt-4o-mini-2024-07-18` (snapshot-pinned) for extraction / synthesize / faithfulness verifier
 - **Cohere Rerank v3.5** optional cross-encoder between fusion and the LLM stage
+- **SurrealDB-native job queue** (Phase J/K) — `job_run` table with CAS-claim/renew/reap, `leader_lease` for cross-pod election. Zero new dependencies beyond the existing SurrealDB. See § Job queue below.
 - Deployment: Docker Hub image, Traefik routing on the inite-temporal droplet, Let's Encrypt cert auto-provision
 - Auth: JWKS via `auth.inite.ai` (audience `brain`); static `BRAIN_API_KEYS` map as fallback for dev only
 
@@ -313,6 +326,46 @@ Body shape: `{ "operations"?: ("dedup" | "resolve" | "summarize")[] }`. Empty / 
 
 Metrics: `brain_dreams_total{outcome=ok|failed}`, `brain_dreams_emitted_total{kind=identity_link|resolution|summary}`. The emitted ratio against ok-runs tells the operator whether dreams is doing useful work or just spinning.
 
+## Job queue (Phase J/K) — SurrealDB-native, multi-pod safe
+
+Cron-driven work (dreams, compaction, calibration refit, source-trust refit, reindex) used to execute inline on every brain process — fine for single-pod deploys, broken under horizontal scale-out where two pods would double-run the same daily pass. The Phase J/K stack replaces that with an enqueue/claim model living entirely in SurrealDB:
+
+```
+   cron tick (any pod)
+         │ enqueue (UNIQUE jobType, dedupKey)
+         ▼
+   job_run row {status:'pending', visibleAfter}
+         │
+         ▼
+   WorkerLoopService (leader pod only — gated by 'worker_loop' leader_lease)
+         │ claimNext (CAS: status='pending' → 'running', claimedBy=hostname#pid)
+         │ renew every ttl/3 (also: reads cancelRequested → propagates AbortSignal)
+         │
+         ▼
+   handler dispatch — in-thread OR JobWorkerPool worker_thread (if cpuBound)
+         │
+         ▼
+   complete / fail (requeue with exponential backoff) / cancelled
+         │
+         ▼
+   LeaseManagerService cron (every 10s)
+   reapZombies: status='running' AND leaseUntil < now → requeue or terminal-fail
+```
+
+**Why Surreal-native instead of Redis / pg-boss / k8s Lease.** All three need a new dependency in the stack. Brain already pays for SurrealDB; `leader_lease` + `job_run` ride the existing SSI + OCC under `retryOnUniqueViolation`. At current scale (~10 jobs/min, 5 cron families) it's enough — the migration path to a real queue is open if we ever cross 50 jobs/sec.
+
+**Leader-elected.** One pod runs the polling loop at a time, gated by the `worker_loop` lease (ttl=90s, renewed every 30s). On lease loss the loop pauses; on re-acquire it resumes. CAS on `claimNext` is the ultimate safety net — even during a heartbeat window where two pods both think they're leader, only one wins the row.
+
+**Fairness.** Per-poll tenant ordering is weighted by recent-claim counter: `weight = 1/(1+recentClaims[jobType::tenant])`. A tenant that's just landed N claims gets weight `1/(N+1)` for the next cycle; quiet neighbours get tried first. Counter decays by 50% every 30s. Phase K2.
+
+**CPU-bound dispatch.** Handlers can opt in via `register(jobType, handler, { cpuBound: true, workerModule: '…' })` to be routed through `JobWorkerPool` — a fixed-size `node:worker_threads` pool. Default `JOB_WORKER_POOL_SIZE=0` (disabled — no current handler is cpuBound; BGE-M3 already owns its own worker, every other handler is IO-bound). Scaffolding ships for future heavy work (multi-pass extractor offload, batch vector math). Phase K1.
+
+**Tracing.** Enqueue → OTel PRODUCER span (`jobs.enqueue`, `messaging.system=surrealdb`, traceparent injected into the row). Dispatch → CONSUMER span (`jobs.process <jobType>`) linked as a child via the row's traceparent. With `OTEL_ENABLED=1` an OTLP backend shows the full publish→queue→process waterfall: time-in-queue is the gap between producer end_time and consumer start_time. Phase K3.
+
+**Kill switch — `JOBS_QUEUE_MODE`.** Default `enqueue`. Set to `inline` + restart the container and every cron-decorated handler falls back to the pre-Phase-J path (`DistributedLeaseGuard.run('dreams_all', () => runAll())` — works on single pod, no job_run rows written). Use when an unexpected backlog accumulates in `pending` and the worker loop won't drain (handler not registered, lease acquire fails, any unforeseen prod issue). No redeploy needed.
+
+**Admin cockpit.** `GET /v1/admin/leases` returns the full picture: which pod holds each `leader_lease` (with `expired` + `expiresInSeconds`), which job_run rows are currently in `running` state (with `claimedBy` / `attempts` / `lastHeartbeatSecondsAgo`), plus this pod's identity and `worker_loop` leader flag. The admin UI page at `/admin/leases` auto-refreshes every 5s and colour-codes stale heartbeats / expired leases. See [`docs/operator-playbook.md`](docs/operator-playbook.md) § Drain a stuck queue for procedures.
+
 ## Multi-hop search
 
 `POST /v1/search/multi-hop` runs a CHAINED search: a planner LLM decomposes the free-text query into ≤ `maxHops` sub-queries with combination semantics, then the executor runs them in sequence — each later hop optionally anchored to the running entity set so the search engine never wastes work on candidates already disqualified upstream.
@@ -467,7 +520,26 @@ apply per tenant on first request via `ensureSchema` (idempotent).
 | `SYNTHESIZE_MODEL` | `OPENAI_CHAT_MODEL` | Override the chat model for `/v1/synthesize` generator + verifier calls. |
 | `SYNTHESIZE_DEFAULT_GUARDRAILS` | `strict` | `strict` / `lenient` / `off`. Caller can override per-request via `synthesisGuardrails`. |
 | `SYNTHESIZE_CONCURRENCY` | `4` | Max in-flight LLM calls across synthesize requests. Each request makes 2 calls (generator + verifier in strict/lenient). |
-| `OTEL_ENABLED` | `0` | Enable OpenTelemetry tracing. When `1`, exports OTLP/HTTP traces with auto-instrumentation for `http` (so OpenAI + JWKS calls show up) + `express` (Nest). The pipeline emits explicit child spans under `search`: `vector_leg`, `lexical_leg`, `route`, `ppr`, `fetch_neighbours`, `rerank` — each annotated with candidate counts. Bring-your-own backend via `OTEL_EXPORTER_OTLP_ENDPOINT` (Jaeger / Grafana Tempo / Datadog / Honeycomb all speak OTLP). Service name defaults to `inite-brain-service`; override via `OTEL_SERVICE_NAME`. No-op when off — zero cost. |
+| `OTEL_ENABLED` | `0` | Enable OpenTelemetry tracing. When `1`, exports OTLP/HTTP traces with auto-instrumentation for `http` (so OpenAI + JWKS calls show up) + `express` (Nest). The pipeline emits explicit child spans under `search`: `vector_leg`, `lexical_leg`, `route`, `ppr`, `fetch_neighbours`, `rerank` — each annotated with candidate counts. **Plus Phase K3 queue handoff spans**: `jobs.enqueue` (PRODUCER) + `jobs.process <jobType>` (CONSUMER, linked via traceparent on the row) — surfaces time-in-queue vs time-in-execution. Bring-your-own backend via `OTEL_EXPORTER_OTLP_ENDPOINT` (Jaeger / Grafana Tempo / Datadog / Honeycomb all speak OTLP). Service name defaults to `inite-brain-service`; override via `OTEL_SERVICE_NAME`. No-op when off — zero cost. |
+| `EMBEDDER_PROVIDER` | `openai` | `openai` (text-embedding-3-small, 1536d) or `bge-m3` (local, 1024d multilingual, ~150MB ONNX). Production ships `bge-m3` via the deploy workflow. Switching providers requires reindex (`POST /v1/admin/maintenance/reindex`) — old vectors don't match new queries. |
+| `BGE_M3_WORKER` | `1` | When `1` (and provider=bge-m3), runs ONNX inference inside a dedicated `worker_thread` so the main event loop keeps serving HTTP while embeds compute. `0` falls back to in-thread inference (~80-800ms event-loop pauses under concurrent embeds; tests use this). |
+
+### Job queue (Phase J/K) — env vars
+
+The queue is on by default. Every var has a safe default; document below for tuning + rollback.
+
+| Var | Default | Notes |
+|---|---|---|
+| `JOBS_QUEUE_MODE` | `enqueue` | `enqueue` (queue mode) or `inline` (legacy guarded inline path — kill switch). Set + restart to roll back queue mode without a redeploy. |
+| `WORKER_LOOP_ENABLED` | `1` | Master switch for the per-pod worker loop. Set `0` to disable claim/dispatch entirely (cron still enqueues; rows stay pending). |
+| `WORKER_LOOP_POLL_MS` | `1000` | Inter-cycle sleep between claim attempts. Tighter → faster pickup, more Surreal load. |
+| `WORKER_LOOP_EMPTY_BACKOFF_MS` | `5000` | Sleep when the queue is empty across every known tenant. Prevents idle pods from hammering Surreal. |
+| `WORKER_LOOP_LEASE_RENEW_MS` | `30000` | How often `worker_loop` leader lease is re-acquired. Lease ttl is 3× this — a crashed leader's lease expires in ~90s. |
+| `LEASE_MANAGER_ENABLED` | `1` | Master switch for the housekeeping cron (zombie reaper every 10s + stale-lease janitor every 60s). |
+| `JOB_RUN_MAX_ATTEMPTS` | `3` | After this many failures the row goes terminal-fail instead of requeueing. |
+| `JOB_RUN_BACKOFF_BASE_MS` | `30000` | Exponential-backoff base for failed/zombie-reaped jobs. Cap is 1h regardless of base × `2^(attempts-1)`. |
+| `JOB_WORKER_POOL_SIZE` | `2` (dev) / `0` (prod) | `node:worker_threads` pool size for `cpuBound: true` handlers. `0` disables the pool entirely (no current handler is cpuBound — the scaffolding is staged for future heavy jobs). |
+| `JOB_RUN_PERSIST` | `1` | Set `0` only in unit tests to disable job_run persistence entirely. Never in prod. |
 
 ### Retrieval feature flags
 
@@ -505,6 +577,7 @@ The service runs `validateEnv()` before NestJS starts. Missing or malformed valu
 | `pnpm test:eval:fat` | spawns a ~500-customer tenant via the generator and asserts retrieval thresholds at scale (FAT_TENANT_RUN=1 implied) | when you've changed retrieval scoring and need to confirm the small-graph regression is gone |
 | `pnpm test:eval:directory` | jumbo eval — 1k customers with retracts, GDPR forgets, temporal tier trajectories, competing status; asserts memory-lifecycle correctness AND recall@3 at scale | when you've touched ingest / lifecycle code; before signing off on a release |
 | `pnpm test:eval:json` | loads a directory from `BRAIN_DIRECTORY_JSON=…/file.json` and runs retrieval + lifecycle assertions; same runner, your data | bringing up brain on a real customer dataset; smoke-testing a CSV→JSON export against the eval harness |
+| `pnpm test --testPathPattern=jobs.real` | Real-Surreal e2e: enqueue → claim → renew → complete cycle, dedup collision, fail+requeue, zombie reap, leader_lease in `system` DB | after touching anything in `src/jobs/` or migrations 0028-0031 |
 | `pnpm lint` | ESLint flat config | every commit |
 
 ### Docker
@@ -527,16 +600,24 @@ spawned brain process with real OpenAI, against ~250 retrieval queries plus
 Layout:
 
 ```
-test/eval/
-├── scenarios/        # 11 declarative .scenarios.ts files + Allen-relation matrix
-├── fixtures/         # fat-tenant generator + wikidata Russian-writers (Latin + Cyrillic)
-├── loaders/          # JsonDirectory loader + Wikidata SPARQL mapper + query-bank generator
-├── metrics/          # recall@k, MRR, NDCG, joint-F1, faithfulness, MIA-AUC,
-│                     #   identity-resolution (B³), bootstrap CI
-├── runner/           # SetupApplier, QueryExecutor, MemoryAssertions,
-│                     #   MiaChecker, FaithfulnessChecker, Aggregator, Reporter
+src/eval/                            # ships in the prod image (admin scenario runner reads at runtime)
+├── scenarios/                       # 16 declarative .scenarios.ts files + Allen-relation matrix
+├── fixtures/                        # fat-tenant generator
 └── types.ts
+
+test/eval/                           # test-time eval harness
+├── http-brain-client.ts             # spawns a real brain process and drives it via HTTP
+├── fixtures/                        # wikidata Russian-writers (Latin + Cyrillic), example JSON directories
+├── loaders/                         # JsonDirectory loader + Wikidata SPARQL mapper + query-bank generator
+├── metrics/                         # recall@k, MRR, NDCG, joint-F1, faithfulness, MIA-AUC,
+│                                    #   identity-resolution (B³), bootstrap CI
+└── runner/                          # SetupApplier, QueryExecutor, MemoryAssertions,
+                                     #   MiaChecker, FaithfulnessChecker, Aggregator, Reporter
 ```
+
+Scenarios + fixture generator live under `src/eval/` because the admin scenario
+runner (`/v1/admin/scenarios/run`) loads them at runtime — they're production
+code, not test code. The runner/loader/metrics modules stay under `test/eval/`.
 
 Reported per-run:
 
@@ -571,28 +652,19 @@ to skip the wikidata legs for fast-iteration loops; default behaviour pulls in
 
 ## Contributing
 
-Open to contributions. Before opening a PR:
+See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the full guide — setup,
+the four hard bars for PRs (tests, append-only migrations, no
+gratuitous deps, commit messages explain the why), what we do and
+don't accept, and the release/rollback model.
 
-1. **Tests must pass** — `pnpm test` (unit, ~5s, 485 cases) and ideally
-   `pnpm test:e2e:real` (testcontainers SurrealDB). The CI gate also runs
-   the multi-vertical eval scenarios with hard thresholds (see § Eval
-   harness); a retrieval-quality regression beyond per-metric tolerance
-   blocks merge.
-2. **Migrations are append-only** — `src/db/migrations/NNNN_*.surql`,
-   numeric order, idempotent (`IF NOT EXISTS` everywhere). Never edit a
-   shipped migration; add a new numbered file. Production tenants only
-   apply each id once, so changes to applied files are silently ignored.
-3. **No new dependencies without justification** — cold-start budget is
-   tight (BGE-M3 already ~150MB ONNX). The `pnpm-lock.yaml` is the
-   contract; a new top-level dep should come with a one-sentence reason
-   in the PR.
-4. **Commit messages explain the why** — see existing log. Phase/iter
-   tags (`feat(jobs): Phase J part 2.1 — ...`) are encouraged for
-   multi-commit feature streams.
+Quick version: every change must pass `pnpm test` + the eval gate
+(retrieval-quality regression beyond per-metric tolerance blocks
+merge), schema changes ship as new numbered migrations in
+`src/db/migrations/`, and PR descriptions are expected to explain
+the *why*, not just the *what*.
 
-Issues and discussions on GitHub welcome — questions about architecture,
-extension points (custom `SummaryGenerator`, alternative embedders, new
-predicate verticals), and operator runbook gaps.
+Security vulnerabilities: don't open a public issue, see
+[`SECURITY.md`](SECURITY.md) for the private channel.
 
 ## License
 

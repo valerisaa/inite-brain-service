@@ -10,8 +10,12 @@ This is the day-2 manual for the people who keep brain running. If you're trying
 4. [Troubleshoot: search returns nothing](#troubleshoot-search-returns-nothing)
 5. [Run a forget (GDPR)](#run-a-forget-gdpr)
 6. [Monitor: metrics + logs](#monitor-metrics--logs)
-7. [Run compaction off-cycle](#run-compaction-off-cycle)
-8. [Restore from event replay](#restore-from-event-replay)
+7. [Run dreams off-cycle](#run-dreams-off-cycle)
+8. [Run compaction off-cycle](#run-compaction-off-cycle)
+9. [Drain a stuck job queue](#drain-a-stuck-job-queue)
+10. [Rollback queue mode (kill switch)](#rollback-queue-mode-kill-switch)
+11. [Run the memory-lifecycle eval](#run-the-memory-lifecycle-eval)
+12. [Restore from event replay](#restore-from-event-replay)
 
 ---
 
@@ -60,7 +64,7 @@ Symptoms: `POST /v1/search` returns `{ results: [] }` for queries that obviously
 2. **The data was forgotten.** Check the tenant's `forgotten_entity` table — there'll be a tombstone row per cascade-forget. Ingests after a forget go to a fresh entity with a new `cuid`, so old searches won't find them.
 3. **Wrong `asOf`.** A historical query with `asOf` predating the fact's `validFrom` will skip it. Drop `asOf` and retry to confirm.
 4. **PII gating.** A caller without `brain:read_pii` cannot see PII facts. Search itself is unaffected (entity still ranks), but specific facts will be missing from the result. Inspect the caller's scopes via the request log's `key=` tag and your key registry.
-5. **Multi-tenant fan-out gone wrong.** Search runs only inside `NS=brain DB=co_<companyId>`. If the caller is on the wrong companyId, they're looking in the wrong DB. Confirm `req.brainAuth.companyId` matches the data's expected tenant.
+5. **Multi-tenant fan-out gone wrong.** Search runs only inside `NS=inite DB=co_<companyId>` (in prod; `NS=brain` in dev when `SURREALDB_NAMESPACE=brain`). If the caller is on the wrong companyId, they're looking in the wrong DB. Confirm `req.brainAuth.companyId` matches the data's expected tenant.
 
 ## Run a forget (GDPR)
 
@@ -133,16 +137,68 @@ When NOT to enable dreams:
 
 ## Run compaction off-cycle
 
-The cron runs daily at 03:17 UTC. To force a run for one tenant (e.g. after a bulk import that immediately needs to age out):
+The cron runs daily at 03:17 UTC. **Under default queue mode** (`JOBS_QUEUE_MODE=enqueue`), the cron enqueues one `compaction` job per tenant — the worker loop on the leader pod claims and dispatches. To force a run for one tenant from an admin caller:
 
-```ts
-// From a one-off script — see scripts/* for similar utilities
-import { CompactionService } from './src/compaction/compaction.service';
-const stats = await app.get(CompactionService).compactCompany('co_acme');
-console.log(stats); // { companyId, factsCompacted, bytesFreed }
+```bash
+# Enqueue a compaction job (manual trigger via the maintenance endpoint —
+# adds a brain:admin entry to /v1/admin/jobs that the worker loop drains).
+# Phase J/K shipped this as an async/202 endpoint set; the older sync
+# "POST /v1/dreams/run" pattern still works for dreams.
+curl -X POST https://brain.example.com/v1/admin/maintenance/dreams/run \
+  -H "authorization: Bearer $ADMIN_KEY" \
+  -H "content-type: application/json" \
+  -d '{ "operations": ["summarize"] }'   # the summarize op delegates to CompactionService
+
+# Or, for a direct one-off bypassing the queue (legacy script path):
+# - Set JOBS_QUEUE_MODE=inline before restart
+# - Use the synchronous /v1/dreams/run (returns full stats inline)
 ```
 
-If the cron itself is missing (no `[CompactionService] Compaction starting…` log line at 03:17 UTC), check that `ScheduleModule` is imported by `CompactionModule` and that the process actually survives until 03:17 (no nightly restart).
+If you don't see the cron tick (`[CompactionService] Compaction starting…` at 03:17 UTC under `JOBS_QUEUE_MODE=inline`, or a `compaction` row appearing in `/v1/admin/jobs` at the same time under `enqueue`), check:
+- `ScheduleModule` is imported by `CompactionModule`
+- the process actually survives until 03:17 (no nightly restart)
+- in queue mode: the leader pod's `worker_loop` lease is held (`GET /v1/admin/leases`)
+- the `compaction` handler is registered (`workerLoop.registeredTypes` in the leases response)
+
+## Drain a stuck job queue
+
+Symptom: `/v1/admin/jobs?status=pending` returns rows that aren't transitioning to `running`. The queue is backing up.
+
+Diagnostic sequence:
+
+1. **Check the leader cockpit.** `GET /v1/admin/leases` shows:
+   - `workerLoop.leader` — is THIS pod the worker? On single-pod prod it must be `true`.
+   - `leaderLeases[].name='worker_loop'` — who holds the lease? `expired: true` means everyone lost it, the next aspirant should pick it up within `WORKER_LOOP_LEASE_RENEW_MS` (30s default).
+   - `workerLoop.registeredTypes` — is the jobType your stuck rows are using actually registered? A typo or a module that didn't run `onModuleInit` shows up as missing here.
+   - `activeClaims[].lastHeartbeatSecondsAgo` — if any are >30s, the worker is wedged.
+
+2. **Stale claims.** If `activeClaims[]` includes a row with `leaseExpired: true`, the `LeaseManagerService` reaper should pick it up within 10s (the cron cadence). If it doesn't, the reaper isn't running — check `leaderLeases[].name='lease_manager_cron'`.
+
+3. **Pending pile-up despite a healthy leader.** Means the handler is too slow OR the empty-backoff is throttling. Tune:
+   - `WORKER_LOOP_POLL_MS` (lower → faster pickup, more Surreal load)
+   - `WORKER_LOOP_EMPTY_BACKOFF_MS` (only kicks when ALL tenants drained — if one tenant is hot the backoff doesn't apply)
+
+4. **Manual rescue.** A truly stuck row can be flipped back to pending via Surreal:
+   ```sql
+   USE NS inite DB co_<companyId>;
+   UPDATE job_run SET status = 'pending', claimedBy = NONE, leaseUntil = NONE,
+                       visibleAfter = time::now()
+     WHERE runId = $stuckRunId;
+   ```
+   The next claim cycle will pick it up. Don't do this if the handler might still be in flight on another pod — race risk.
+
+## Rollback queue mode (kill switch)
+
+If queue mode is misbehaving and you need to fall back to pre-Phase-J inline execution NOW:
+
+1. SSH to the droplet (`/opt/projects/inite-brain-service`).
+2. Edit `docker-compose.yml` — change `JOBS_QUEUE_MODE=enqueue` to `JOBS_QUEUE_MODE=inline`.
+3. `docker-compose up -d --force-recreate inite-brain-service`.
+4. Verify: next cron tick at 03:17 / 04:00 / 03:42 / 03:51 UTC should log `[CompactionService] Compaction starting — N tenant(s)` etc. NO `enqueued` log line. NO new pending rows in `job_run`.
+
+`inline` mode bypasses `enqueue → claim → dispatch` entirely. Cron handlers run synchronously inside the `@Cron`-decorated method, gated only by `DistributedLeaseGuard.run(<key>, ...)` (same key the pre-Phase-J code used). Existing `pending` rows in `job_run` are NOT consumed — they sit until you either (a) flip back to `enqueue`, (b) manually transition them to `cancelled`, or (c) delete them.
+
+Use this as a last-resort. The proper fix is to find what broke queue mode (usually: a handler crashed during registration; the leader pod is unhealthy; Surreal SSI is rejecting too many transactions) and address it.
 
 ## Run the memory-lifecycle eval
 
@@ -167,7 +223,7 @@ Memory assertions probe a bounded slice (first 10 entries) of each lifecycle buc
 
 Brain is a **system of insight**. If the storage layer is wiped, restore by replaying the upstream events:
 
-1. Identify the affected tenants (`co_*` under `NS=brain`). For each, the `recordedAt` of the most recent fact is the time-of-loss.
+1. Identify the affected tenants (`co_*` under your configured `SURREALDB_NAMESPACE`, `NS=inite` in prod). For each, the `recordedAt` of the most recent fact is the time-of-loss.
 2. Pull events from upstream (`inbox.message.received`, `billing.payment.*`, etc.) since that timestamp.
 3. Re-publish them into brain's normal ingest path. The conflict resolver will deduplicate against any survivors.
 
