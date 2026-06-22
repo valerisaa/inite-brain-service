@@ -182,32 +182,48 @@ export class DreamsService implements OnModuleInit {
 
   /**
    * Handler entry point — runs the actual dreams pipeline for ONE
-   * tenant as dispatched by the WorkerLoopService. The job_run row's
-   * status/result/error are managed by WorkerLoopService.dispatch —
-   * this method only does the work and surfaces stats. Honours
-   * ctx.abortSignal so a cross-pod cancel or pod shutdown propagates
-   * into the sub-services (when they support AbortSignal).
+   * tenant as dispatched by the WorkerLoopService.
+   *
+   * Job-row lifecycle: managed by WorkerLoopService.dispatch (claimed
+   * to 'running' on claimNext; written to 'succeeded'/'failed'/
+   * 'cancelled' depending on this method's outcome). We never touch
+   * the row directly — skipJobRowLifecycle=true tells the inner
+   * method not to start()/finish() either.
+   *
+   * Cancellation: ctx.abortSignal fires when (a) an operator hit
+   * /v1/admin/jobs/:id/cancel and the renew tick saw
+   * cancelRequested=true, (b) we lost the claim (zombie reap took
+   * it), or (c) the pod is shutting down. We check the signal
+   * between dedup → resolve → summarize so an in-flight handler
+   * exits cleanly within ttl/3 (~6.5min for ttlSeconds=1200).
+   * Throwing here routes to cancelled() (not fail+requeue) inside
+   * WorkerLoopService.dispatch.
    */
   async executeFromQueue(
     ctx: JobContext,
   ): Promise<Record<string, unknown>> {
     const opsRaw = ctx.payload?.operations as DreamsOperation[] | undefined;
     const ops = opsRaw && opsRaw.length ? opsRaw : [...this.defaultOps];
+    this.throwIfAborted(ctx);
     const stats = await this.runForTenantInner(
       ctx.companyId,
       ops,
       { triggeredBy: 'cron', triggeredByActor: ctx.workerId },
-      { skipJobRowLifecycle: true },
+      { skipJobRowLifecycle: true, abortSignal: ctx.abortSignal },
     );
-    if (ctx.abortSignal.aborted) {
-      throw ctx.abortSignal.reason ?? new Error('aborted');
-    }
+    this.throwIfAborted(ctx);
     return {
       durationSeconds: stats.durationSeconds,
       identityLinksCreated: stats.dedup?.identityLinksCreated ?? 0,
       resolutionsApplied: stats.resolve?.resolutionsApplied ?? 0,
       summarized: stats.summarized ?? false,
     };
+  }
+
+  private throwIfAborted(ctx: JobContext): void {
+    if (ctx.abortSignal.aborted) {
+      throw ctx.abortSignal.reason ?? new Error('aborted');
+    }
   }
 
   /**
@@ -290,8 +306,13 @@ export class DreamsService implements OnModuleInit {
       triggeredBy?: 'cron' | 'manual' | 'startup';
       triggeredByActor?: string;
     },
-    opts?: { skipJobRowLifecycle?: boolean },
+    opts?: { skipJobRowLifecycle?: boolean; abortSignal?: AbortSignal },
   ): Promise<DreamsTenantStats> {
+    const checkAbort = () => {
+      if (opts?.abortSignal?.aborted) {
+        throw opts.abortSignal.reason ?? new Error('aborted');
+      }
+    };
     const t0 = Date.now();
     const stats: DreamsTenantStats = {
       companyId,
@@ -323,6 +344,7 @@ export class DreamsService implements OnModuleInit {
     try {
       await this.surreal.withCompany(companyId, async (db) => {
         if (opSet.has('dedup')) {
+          checkAbort();
           stats.dedup = await withSpan(
             'dreams.dedup',
             () => this.dedup.run(db),
@@ -336,6 +358,7 @@ export class DreamsService implements OnModuleInit {
           }
         }
         if (opSet.has('resolve')) {
+          checkAbort();
           stats.resolve = await withSpan(
             'dreams.resolve',
             () => this.resolver.run(db),
@@ -353,6 +376,7 @@ export class DreamsService implements OnModuleInit {
       });
 
       if (opSet.has('summarize')) {
+        checkAbort();
         // Compaction owns its own connection lifecycle (it iterates
         // over knowledge_fact in batches and updates statuses), so we
         // delegate rather than threading the existing db handle in.

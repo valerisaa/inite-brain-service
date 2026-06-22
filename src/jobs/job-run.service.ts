@@ -79,7 +79,19 @@ export interface JobRunRow {
 export class JobRunService {
   private readonly logger = new Logger(JobRunService.name);
   private readonly stream = new Subject<JobRunRow>();
-  private readonly cancelRequestsAcrossPods = new Set<string>();
+  /**
+   * In-process cancel hints — Set of runIds whose cancel was requested
+   * on THIS pod. Lets handlers running on the same pod that received
+   * the cancel HTTP call see the request without a DB round-trip on
+   * every isCancelRequested check.
+   *
+   * Cross-pod cancel does NOT live here. The persisted truth is
+   * `job_run.cancelRequested=true`, written by requestCancel; the
+   * worker loop polls it on every renew tick (ttl/3 cadence) and
+   * propagates into the handler's AbortSignal. Pre-Phase-J this Set
+   * was misnamed `cancelRequestsAcrossPods` — it never replicated.
+   */
+  private readonly inProcessCancelHints = new Set<string>();
   private readonly persistEnabled: boolean;
 
   constructor(
@@ -202,26 +214,46 @@ export class JobRunService {
         );
       }
     }
-    this.cancelRequestsAcrossPods.delete(row.runId);
+    this.inProcessCancelHints.delete(row.runId);
     this.stream.next(row);
   }
 
   /**
-   * Operator-requested cancellation. Marks the row + remembers the
-   * request in-memory so the running job sees it on its next
-   * checkpoint without a DB round-trip.
+   * Operator-requested cancellation.
+   *
+   *   pending rows → terminal-cancel directly (the work hasn't started
+   *                  yet, so there's nothing to observe the flag).
+   *   running rows → set cancelRequested=true; WorkerLoopService.renew
+   *                  reads it on next tick and aborts the handler.
+   *                  Pre-queue inline handlers still poll via
+   *                  isCancelRequested between batches.
+   *
+   * Returns whether the row was found AND now in a cancel-respecting
+   * state (cancelled or running-with-flag-set). Already-terminal rows
+   * (succeeded/failed/cancelled) return false — caller's HTTP gets a
+   * "no longer cancellable" hint.
    */
   async requestCancel(runId: string, companyId: string): Promise<boolean> {
-    this.cancelRequestsAcrossPods.add(runId);
+    this.inProcessCancelHints.add(runId);
     if (!this.persistEnabled || !this.surreal) return true;
     try {
       const updated = await this.surreal.withCompany(companyId, async (db) => {
+        // Atomic: take pending rows straight to cancelled, flag running
+        // rows. RETURN status so we can tell the caller which path fired.
         const res = (await db.query<any[]>(
-          `UPDATE job_run SET cancelRequested = true
-            WHERE runId = $runId AND status = 'running' RETURN AFTER`,
+          `UPDATE job_run SET
+              cancelRequested = true,
+              status = IF status = 'pending' THEN 'cancelled' ELSE status END,
+              finishedAt = IF status = 'pending' THEN time::now() ELSE finishedAt END,
+              claimedBy = IF status = 'pending' THEN NONE ELSE claimedBy END,
+              leaseUntil = IF status = 'pending' THEN NONE ELSE leaseUntil END
+            WHERE runId = $runId
+              AND status IN ['pending', 'running']
+            RETURN status`,
           { runId },
         )) as any[];
-        return Array.isArray(res[0]) && res[0].length > 0;
+        const rows = (res[0] ?? []) as Array<{ status?: string }>;
+        return rows.length > 0;
       });
       return updated;
     } catch (e) {
@@ -236,7 +268,7 @@ export class JobRunService {
     runId: string,
     companyId: string,
   ): Promise<boolean> {
-    if (this.cancelRequestsAcrossPods.has(runId)) return true;
+    if (this.inProcessCancelHints.has(runId)) return true;
     if (!this.persistEnabled || !this.surreal) return false;
     try {
       return await this.surreal.withCompany(companyId, async (db) => {
