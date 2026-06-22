@@ -32,7 +32,7 @@ export function OpenSource({ lang }: Props) {
   return (
     <section id="open-source" className="py-16 border-t border-[var(--border)] scroll-mt-20">
       <SectionHeading
-        index="07"
+        index="10"
         eyebrow={t.openSource.eyebrow}
         title={t.openSource.title}
         subtitle={t.openSource.subtitle}

@@ -17,7 +17,7 @@ export function Stats({ lang }: Props) {
   return (
     <section className="py-16 border-t border-[var(--border)]">
       <SectionHeading
-        index="02"
+        index="06"
         eyebrow={t.stats.eyebrow}
         title={t.stats.title}
         subtitle={t.stats.subtitle}

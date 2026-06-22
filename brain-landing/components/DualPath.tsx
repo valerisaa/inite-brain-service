@@ -14,7 +14,7 @@ export function DualPath({ lang }: Props) {
   const t = getMessages(lang)
   return (
     <section id="deploy" className="py-16 scroll-mt-20">
-      <SectionHeading index="01" eyebrow={t.dualPath.eyebrow} title={t.dualPath.title} />
+      <SectionHeading index="05" eyebrow={t.dualPath.eyebrow} title={t.dualPath.title} />
 
       <div className="mt-8 grid md:grid-cols-2 gap-4">
         {/* self-host */}

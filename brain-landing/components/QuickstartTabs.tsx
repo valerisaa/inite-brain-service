@@ -84,7 +84,7 @@ export function QuickstartTabs({ lang }: Props) {
   return (
     <section className="py-16 border-t border-[var(--border)]">
       <SectionHeading
-        index="04"
+        index="07"
         eyebrow={t.quickstart.eyebrow}
         title={t.quickstart.title}
         subtitle={t.quickstart.subtitle}

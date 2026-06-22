@@ -24,6 +24,54 @@
       "note": "Default queries answer 'now'. Pass asOf and the same query returns what Brain knew at that moment — nothing reconstructed after the fact."
     }
   },
+  "bitemporal": {
+    "eyebrow": "Bitemporal · live demo",
+    "title": "Replay what Brain knew, not what's true now.",
+    "subtitle": "Acme moved from the starter plan to growth on Mar 10. Brain only recorded the switch on Mar 12. Drag both clocks — history gets replayed, never rewritten.",
+    "validLabel": "valid time — when it was true",
+    "txnLabel": "transaction time — when Brain knew",
+    "markSwitch": "plan switch",
+    "markRecorded": "Brain records it",
+    "answerLabel": "Brain answers",
+    "scenario": "scenario · acme plan change · starter → growth",
+    "notes": {
+      "unknown": "The transaction clock sits before Mar 12. Brain hasn't recorded the switch yet, so it still answers starter — even for dates after Mar 10. That's the past, replayed exactly.",
+      "past": "Valid time is before Mar 10. Back then, starter was the truth.",
+      "current": "Both clocks are current — the switch happened and Brain knows it. Growth is the live answer."
+    }
+  },
+  "retrieval": {
+    "eyebrow": "Retrieval engine",
+    "title": "A pipeline, not a cosine match.",
+    "subtitle": "Brain doesn't just rank embeddings by similarity. Every query runs a graph-aware pipeline — each stage a feature flag with its own per-tenant metrics.",
+    "queryIn": "query + tenant scope",
+    "answerOut": "ranked facts + per-leg score breakdown",
+    "note": "Each stage toggles and is measured independently; the CI eval reports recall per leg. HNSW, HyPE, PPR, and rerank all flip per tenant.",
+    "stages": [
+      { "name": "Hybrid fusion", "desc": "Vector + BM25, convex-combined at w=0.5" },
+      { "name": "HyPE alt-embeddings", "desc": "Hypothetical-prompt vectors; max(cos_main, cos_alt)" },
+      { "name": "Predicate + type router", "desc": "A joint LLM router boosts the right predicate class" },
+      { "name": "Edge expansion", "desc": "A 1-hop graph walk seeds neighbours as fresh candidates" },
+      { "name": "Tier-aware PPR", "desc": "HippoRAG-style personalized PageRank over the graph" },
+      { "name": "Cross-encoder rerank", "desc": "Cohere reranks a wide window" },
+      { "name": "Listwise LLM rerank", "desc": "Permutation self-consistency, Borda-aggregated" }
+    ]
+  },
+  "beyondVector": {
+    "eyebrow": "Beyond embeddings",
+    "title": "What a vector store can't tell you.",
+    "subtitle": "Embeddings find text that looks similar. A memory layer has to do more than that.",
+    "colA": "Plain vector store",
+    "colB": "INITE Brain",
+    "rows": [
+      { "a": "Chunks of text, ranked by cosine similarity", "b": "Typed subject–predicate–object facts on a graph" },
+      { "a": "Only what looks true now", "b": "Two clocks — query now, or as of any past moment" },
+      { "a": "Re-embedding silently overwrites the old vector", "b": "Conflicts get scored; close calls land as COMPETING" },
+      { "a": "Delete a row and hope it's gone", "b": "Forget cascades facts, edges, embeddings — HMAC tombstone left" },
+      { "a": "No notion of relationships", "b": "Typed edges plus a multi-hop planner across them" },
+      { "a": "PII sits in the same index as everything else", "b": "DB-level PII fence, gated by caller scope" }
+    ]
+  },
   "dualPath": {
     "eyebrow": "Self-host or hosted",
     "title": "Two ways to run it. Same graph.",
@@ -67,32 +115,54 @@
     ]
   },
   "features": {
-    "eyebrow": "Capabilities",
-    "title": "What brain actually does.",
+    "eyebrow": "The rest of the stack",
+    "title": "More than a retriever.",
+    "subtitle": "Everything between an ingest and an answer you can trust.",
     "items": [
       {
-        "title": "Bitemporal facts",
-        "desc": "Two axes per fact — valid time (real world) and transaction time (what brain knew when). Default queries answer 'actual now'; pass asOf for historical investigations."
-      },
-      {
-        "title": "Content predicates (v1.1)",
-        "desc": "First-class vocabulary for content-domain knowledge — comments, reviews, tags, brands, categories. Each predicate carries semantics, decay, and PII class up front."
-      },
-      {
-        "title": "Lifecycle correctness = 1.0",
-        "desc": "Update, supersede, retract, forget. The eval gate refuses anything under 1.0. GDPR forget is synchronous and leaves only an HMAC tombstone."
-      },
-      {
+        "tag": "Ingest",
         "title": "Conflict resolution",
-        "desc": "Two ingests for the same fact go through a scored ladder (confidence × source-trust × recency × authority). Margins matter — close calls land as COMPETING, not silent overwrites."
+        "desc": "Two ingests for one fact go through a scored ladder — confidence × source-trust × recency × authority. Close calls land as COMPETING, never a silent overwrite."
       },
       {
-        "title": "MCP, native",
-        "desc": "Per-tenant Streamable HTTP endpoint with six scope-aware tools. Claude Desktop, Cursor, Goose, n8n — same URL, same auth header, no glue code."
+        "tag": "Graph",
+        "title": "Identity resolution",
+        "desc": "Cross-vertical merges collapse duplicates into one entity via identity_of edges; re-attribution follows mergedInto. B³ identity-F1 holds at 1.0."
       },
       {
-        "title": "Hybrid retrieval",
-        "desc": "Vector + BM25 + optional HyPE + cross-encoder + listwise LLM rerank with self-consistency. Every stage is a feature flag with per-tenant metrics."
+        "tag": "Lifecycle",
+        "title": "GDPR forget",
+        "desc": "A forget is a synchronous hard delete — facts, edges, and embeddings gone. Only an HMAC tombstone stays, so you can prove it happened."
+      },
+      {
+        "tag": "Safety",
+        "title": "PII fence",
+        "desc": "PII is gated at the database layer with PERMISSIONS and caller scopes. Every predicate declares its PII class up front."
+      },
+      {
+        "tag": "Retrieval",
+        "title": "Multi-hop",
+        "desc": "A planner LLM splits a question into up to four anchored sub-queries. Supporting facts carry through for HotpotQA-style joint-F1 scoring."
+      },
+      {
+        "tag": "Synthesis",
+        "title": "Faithful answers",
+        "desc": "/v1/synthesize runs corrective-RAG with strict / lenient / off guardrails and a claim-level faithfulness scorer. Pass-rate gates at 1.0."
+      },
+      {
+        "tag": "Schema",
+        "title": "Predicate ontology",
+        "desc": "A per-tenant, OWL-equivalent registry. Each predicate carries semantics, decay, and PII class — the router and resolver both read it."
+      },
+      {
+        "tag": "Ops",
+        "title": "Dreams",
+        "desc": "Off-hours, Brain dedups entities, resolves competing facts, and summarizes — self-improvement on a cron, not a manual chore."
+      },
+      {
+        "tag": "Tenancy",
+        "title": "Per-tenant isolation",
+        "desc": "Each company gets its own database (co_<id>). One REMOVE DATABASE forgets a whole tenant. Nothing leaks across the wall."
       }
     ]
   },
@@ -106,7 +176,7 @@
     "title": "One config block. Six tools. Any client.",
     "subtitle": "A per-tenant MCP URL, scope-aware. Drop it into Claude Desktop, Cursor, Goose, or n8n and the agent gets the same six tools.",
     "toolsLabel": "Six scope-aware tools",
-    "clients": "Claude Desktop, Cursor, Goose, n8n — same URL, same auth header, no glue code.",
+    "clients": "Same URL, same auth header, no glue code — whatever speaks MCP.",
     "linkLabel": "MCP setup guide"
   },
   "skillsBlock": {

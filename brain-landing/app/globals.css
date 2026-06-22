@@ -186,6 +186,33 @@ body {
   animation: live-pulse 2.4s ease-out infinite;
 }
 
+/* bitemporal demo range sliders */
+.bt-range {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 4px;
+  border-radius: 999px;
+  background: var(--border-strong);
+  cursor: pointer;
+}
+.bt-range::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 16px;
+  height: 16px;
+  border-radius: 999px;
+  background: var(--bg);
+  border: 2px solid currentColor;
+  box-shadow: 0 0 10px -2px currentColor;
+}
+.bt-range::-moz-range-thumb {
+  width: 16px;
+  height: 16px;
+  border-radius: 999px;
+  background: var(--bg);
+  border: 2px solid currentColor;
+}
+
 /* gradient hairline rule */
 .lab-rule {
   height: 1px;

@@ -21,7 +21,7 @@ export function McpInstall({ lang }: Props) {
   return (
     <section className="py-16 border-t border-[var(--border)]">
       <SectionHeading
-        index="05"
+        index="08"
         eyebrow={t.mcpBlock.eyebrow}
         title={t.mcpBlock.title}
         subtitle={t.mcpBlock.subtitle}
