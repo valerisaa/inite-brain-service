@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { ExecutionContext, Injectable } from '@nestjs/common';
 import { ThrottlerGuard } from '@nestjs/throttler';
 import { createHash } from 'node:crypto';
 
@@ -22,6 +22,18 @@ import { createHash } from 'node:crypto';
  */
 @Injectable()
 export class TenantThrottlerGuard extends ThrottlerGuard {
+  /**
+   * Global off-switch. Per-route @Throttle() decorators hardcode their
+   * own limits, which the THROTTLE_*_LIMIT env knobs can't override, so
+   * e2e suites that legitimately fire >N expensive calls would 429.
+   * THROTTLE_DISABLED=1 (set only by the test fixture) skips throttling
+   * entirely. Never set in production.
+   */
+  protected async shouldSkip(context: ExecutionContext): Promise<boolean> {
+    if (process.env.THROTTLE_DISABLED === '1') return true;
+    return super.shouldSkip(context);
+  }
+
   protected async getTracker(req: Record<string, unknown>): Promise<string> {
     const headers = (req.headers as Record<string, string> | undefined) ?? {};
     const auth = headers.authorization;

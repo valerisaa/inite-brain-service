@@ -46,6 +46,11 @@ export async function createApp(opts: {
   // The throttler itself is covered by `test/throttler.unit-spec.ts`.
   process.env.THROTTLE_LIMIT = '1000000';
   process.env.THROTTLE_EXPENSIVE_LIMIT = '1000000';
+  // The env limits above only reach the named-bucket defaults; per-route
+  // @Throttle decorators hardcode their own (e.g. search/synthesize at
+  // 10/min). Hard-disable throttling in e2e so a suite firing >10
+  // expensive calls doesn't 429. See TenantThrottlerGuard.shouldSkip.
+  process.env.THROTTLE_DISABLED = '1';
   if (opts.enableScopedPool) {
     process.env.SURREALDB_SCOPED_USER = 'brain_caller';
     process.env.SURREALDB_SCOPED_PASS =
