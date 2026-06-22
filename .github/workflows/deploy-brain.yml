@@ -336,6 +336,14 @@ jobs:
                 timeout: 5s
                 retries: 5
                 start_period: 30s
+              # Resource ceilings: local ONNX (BGE-M3 / NER) + worker pool
+              # + LLM fan-out can balloon RSS. Without a cap an unbounded
+              # container can OOM the shared host / trip the kernel OOM
+              # killer mid-job. Tune per box; these are conservative.
+              mem_limit: 2g
+              mem_reservation: 768m
+              cpus: 2.0
+              pids_limit: 512
               networks:
                 - traefik-global
                 - default
@@ -346,9 +354,10 @@ jobs:
           EOF
 
           # Bind-mount target must exist and be writable by the container's
-          # node user (uid 1000 on node:alpine). Without this docker creates
-          # it root-owned and the BaselineService fs.writeFile fails with
-          # EACCES on first save.
+          # node user (uid 1000 on node:22-slim — the image now runs as
+          # USER node, so this chown matches the runtime user). Without
+          # this docker creates it root-owned and BaselineService's
+          # fs.writeFile fails with EACCES on first save.
           mkdir -p /opt/projects/${{ env.PROJECT_NAME }}/baselines
           chown -R 1000:1000 /opt/projects/${{ env.PROJECT_NAME }}/baselines || true
 

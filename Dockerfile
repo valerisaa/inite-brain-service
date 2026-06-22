@@ -58,7 +58,21 @@ RUN corepack enable && pnpm install --frozen-lockfile --prod
 
 COPY --from=builder /app/dist ./dist
 
+# Run as the unprivileged `node` user (uid 1000, ships with the official
+# image) instead of root. node_modules / dist stay root-owned but are
+# world-readable, which is all the runtime needs. The two writable paths:
+#   - the @xenova/transformers / onnxruntime model cache (lazy download
+#     on warmup) — pointed at /app/.cache, owned by node.
+#   - the baselines bind-mount, which the deploy workflow already chowns
+#     to 1000:1000 (matching this user).
+RUN mkdir -p /app/.cache && chown node:node /app/.cache
+ENV TRANSFORMERS_CACHE=/app/.cache \
+    HF_HOME=/app/.cache \
+    XDG_CACHE_HOME=/app/.cache
+
 ENV NODE_ENV=production
 EXPOSE 3000
+
+USER node
 
 CMD ["node", "dist/main.js"]

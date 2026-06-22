@@ -29,11 +29,27 @@ services:
       - SURREALDB_USERNAME=root
       - SURREALDB_PASSWORD=root
       - SURREALDB_NAMESPACE=brain
+      # The image runs NODE_ENV=production, so validateEnv requires the
+      # scoped pool creds. brain_caller is (re)provisioned with this
+      # password on first tenant request (migration 0005 + ensureScopedUser).
+      - SURREALDB_SCOPED_USER=brain_caller
+      - SURREALDB_SCOPED_PASS=${SURREALDB_SCOPED_PASS:-local-scoped-secret}
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - BRAIN_API_KEYS=${BRAIN_API_KEYS:-[]}
       - FORGET_HMAC_KEY=${FORGET_HMAC_KEY:-}
     ports:
       - "${BRAIN_HOST_PORT:-3030}:3000"
+    # Mirror the prod ceilings so local OOMs surface here, not in deploy.
+    mem_limit: 2g
+    mem_reservation: 768m
+    cpus: 2.0
+    pids_limit: 512
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
 
 volumes:
   surrealdb-data:
