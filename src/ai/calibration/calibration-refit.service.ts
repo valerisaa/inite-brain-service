@@ -1,4 +1,4 @@
-import { Injectable, Logger, Optional } from '@nestjs/common';
+import { Injectable, Logger, OnModuleInit, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Cron } from '@nestjs/schedule';
 import { ApiKeyService } from '../../auth/api-key.service';
@@ -10,6 +10,11 @@ import {
 } from './isotonic';
 import { CalibrationService } from './calibration.service';
 import { JobRunService } from '../../jobs/job-run.service';
+import { JobClaimService } from '../../jobs/job-claim.service';
+import {
+  WorkerLoopService,
+  type JobContext,
+} from '../../jobs/worker-loop.service';
 import { DistributedLeaseGuard } from '../../common/distributed-lease.guard';
 
 /**
@@ -41,7 +46,7 @@ import { DistributedLeaseGuard } from '../../common/distributed-lease.guard';
  * (04:00), so we don't fight any other write pass.
  */
 @Injectable()
-export class CalibrationRefitService {
+export class CalibrationRefitService implements OnModuleInit {
   private readonly logger = new Logger(CalibrationRefitService.name);
   private readonly enabled: boolean;
   private readonly extractorModel: string;
@@ -60,6 +65,8 @@ export class CalibrationRefitService {
     private readonly calibration: CalibrationService,
     config: ConfigService,
     @Optional() private readonly jobs?: JobRunService,
+    @Optional() private readonly claim?: JobClaimService,
+    @Optional() private readonly workerLoop?: WorkerLoopService,
   ) {
     this.enabled =
       (config.get<string>('CALIBRATION_NIGHTLY_REFIT', 'true').toLowerCase()) ===
@@ -70,18 +77,90 @@ export class CalibrationRefitService {
     );
   }
 
-  /** Cron entry — source-trust refit at 03:42 UTC. */
+  onModuleInit(): void {
+    if (!this.workerLoop) return;
+    this.workerLoop.register(
+      'source_trust_refit',
+      async (ctx) => {
+        // Cross-tenant single-row job — the refit walks all tenants.
+        const upserted = await this.refitSourceTrustInner(
+          {
+            triggeredBy: 'cron',
+            triggeredByActor: ctx.workerId,
+          },
+          { skipJobRowLifecycle: true },
+        );
+        return { upserted };
+      },
+      { ttlSeconds: 600, maxAttempts: 2 },
+    );
+    this.workerLoop.register(
+      'calibration_refit',
+      async (ctx) => {
+        const sampleCount = await this.refitCalibrationInner(
+          {
+            triggeredBy: 'cron',
+            triggeredByActor: ctx.workerId,
+          },
+          { skipJobRowLifecycle: true },
+        );
+        return { sampleCount };
+      },
+      { ttlSeconds: 600, maxAttempts: 2 },
+    );
+  }
+
+  /**
+   * Cron entry — source-trust refit at 03:42 UTC. Queue mode enqueues
+   * a single cross-tenant row (the refit walks every tenant
+   * internally). Date-keyed dedupKey absorbs a second firing during
+   * leader transition.
+   */
   @Cron('42 3 * * *', { timeZone: 'UTC' })
-  async refitSourceTrustDaily(): Promise<number> {
+  async refitSourceTrustDaily(): Promise<number | { enqueued: boolean }> {
     if (!this.enabled) return 0;
+    if (this.claim) return this.enqueueRefit('source_trust_refit');
     return this.refitSourceTrust();
   }
 
   /** Cron entry — calibration refit at 03:51 UTC. */
   @Cron('51 3 * * *', { timeZone: 'UTC' })
-  async refitCalibrationDaily(): Promise<number> {
+  async refitCalibrationDaily(): Promise<number | { enqueued: boolean }> {
     if (!this.enabled) return 0;
+    if (this.claim) return this.enqueueRefit('calibration_refit');
     return this.refitCalibration();
+  }
+
+  private async enqueueRefit(
+    jobType: 'source_trust_refit' | 'calibration_refit',
+  ): Promise<{ enqueued: boolean }> {
+    // Both refits are CROSS-tenant single jobs (the inner method walks
+    // every tenant). Use the first known tenant as the row's home —
+    // matches the existing inline-path behaviour (see hostTenant in
+    // refitSourceTrustInner / refitCalibrationInner).
+    const hostTenant = this.apiKeys.knownCompanyIds()[0];
+    if (!hostTenant) {
+      this.logger.warn(`enqueue ${jobType} skipped — no known tenants`);
+      return { enqueued: false };
+    }
+    const today = new Date().toISOString().slice(0, 10);
+    try {
+      const { created } = await this.claim!.enqueue({
+        jobType,
+        companyId: hostTenant,
+        triggeredBy: 'cron',
+        dedupKey: `${jobType}_${today}`,
+      });
+      this.logger.log(
+        `${jobType} cron ${created ? 'enqueued' : 'collapsed (already enqueued)'} for ${today}`,
+      );
+      return { enqueued: created };
+    } catch (e) {
+      this.logger.warn(
+        `enqueue ${jobType} failed: ${(e as Error).message}`,
+      );
+      return { enqueued: false };
+    }
   }
 
   // ── Source-trust pass ────────────────────────────────────────────
@@ -107,12 +186,13 @@ export class CalibrationRefitService {
       triggeredBy?: 'cron' | 'manual' | 'startup';
       triggeredByActor?: string;
     },
+    opts?: { skipJobRowLifecycle?: boolean },
   ): Promise<number> {
     const tenants = this.apiKeys.knownCompanyIds();
     let upserted = 0;
     const hostTenant = tenants[0];
     let jobRow = null as null | Awaited<ReturnType<JobRunService['start']>>;
-    if (hostTenant && this.jobs) {
+    if (hostTenant && this.jobs && !opts?.skipJobRowLifecycle) {
       try {
         jobRow = await this.jobs.start({
           jobType: 'source_trust_refit',
@@ -244,11 +324,12 @@ export class CalibrationRefitService {
       triggeredBy?: 'cron' | 'manual' | 'startup';
       triggeredByActor?: string;
     },
+    opts?: { skipJobRowLifecycle?: boolean },
   ): Promise<number> {
     const tenants = this.apiKeys.knownCompanyIds();
     const hostTenant = tenants[0];
     let jobRow = null as null | Awaited<ReturnType<JobRunService['start']>>;
-    if (hostTenant && this.jobs) {
+    if (hostTenant && this.jobs && !opts?.skipJobRowLifecycle) {
       try {
         jobRow = await this.jobs.start({
           jobType: 'calibration_refit',

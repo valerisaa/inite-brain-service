@@ -1,4 +1,4 @@
-import { Injectable, Logger, Optional } from '@nestjs/common';
+import { Injectable, Logger, OnModuleInit, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Cron } from '@nestjs/schedule';
 import { ApiKeyService } from '../auth/api-key.service';
@@ -10,6 +10,11 @@ import { DreamsResolverService, ResolverResult } from './resolver.service';
 import { CompactionService } from '../compaction/compaction.service';
 import { DreamsOperation } from './dto/run-dreams.dto';
 import { JobRunService, JobRunRow } from '../jobs/job-run.service';
+import { JobClaimService } from '../jobs/job-claim.service';
+import {
+  WorkerLoopService,
+  type JobContext,
+} from '../jobs/worker-loop.service';
 import { DistributedLeaseGuard } from '../common/distributed-lease.guard';
 
 export interface DreamsTenantStats {
@@ -50,7 +55,7 @@ export interface DreamsTenantStats {
  * not stop tenant N+1.
  */
 @Injectable()
-export class DreamsService {
+export class DreamsService implements OnModuleInit {
   private readonly logger = new Logger(DreamsService.name);
   private readonly enabled: boolean;
   private readonly defaultOps: ReadonlySet<DreamsOperation>;
@@ -72,6 +77,8 @@ export class DreamsService {
     private readonly configService: ConfigService,
     @Optional() private readonly metrics?: MetricsService,
     @Optional() private readonly jobs?: JobRunService,
+    @Optional() private readonly claim?: JobClaimService,
+    @Optional() private readonly workerLoop?: WorkerLoopService,
     @Optional() private readonly guard: DistributedLeaseGuard = new DistributedLeaseGuard(),
   ) {
     this.enabled =
@@ -96,10 +103,41 @@ export class DreamsService {
     );
   }
 
-  /** Cron entry — daily at 04:00 UTC, 43 min after compaction (03:17). */
+  /**
+   * Register the dreams handler with the worker loop. Called once at
+   * boot — handler stays inert until the leader pod's worker loop
+   * dequeues a `dreams` job.
+   */
+  onModuleInit(): void {
+    if (!this.workerLoop) return;
+    this.workerLoop.register(
+      'dreams',
+      (ctx) => this.executeFromQueue(ctx),
+      // ttl: dreams can take ≥10min on large tenants (dedup LLM judge
+      // + competing-fact resolution + summarize); 20min lease gives
+      // 6 renew ticks of safety margin.
+      { ttlSeconds: 1200, maxAttempts: 3 },
+    );
+  }
+
+  /**
+   * Cron entry — daily at 04:00 UTC, 43 min after compaction (03:17).
+   *
+   * Queue mode (JobClaimService wired): enqueue one row per known
+   * tenant with a date-keyed dedupKey so a second cron firing during
+   * a leader transition collapses cleanly. WorkerLoopService picks
+   * up rows on the leader pod.
+   *
+   * Legacy mode (JobClaimService not wired — tests, single-pod dev):
+   * fall back to the original guarded runAll() so callers don't lose
+   * functionality.
+   */
   @Cron('0 4 * * *', { timeZone: 'UTC' })
-  async runDaily(): Promise<DreamsTenantStats[]> {
+  async runDaily(): Promise<DreamsTenantStats[] | { enqueued: number }> {
     if (!this.enabled) return [];
+    if (this.claim) {
+      return this.enqueueDailyForAllTenants();
+    }
     const result = await this.guard.run('dreams_all', () => this.runAll());
     if (result === null) {
       this.logger.warn(
@@ -108,6 +146,68 @@ export class DreamsService {
       return [];
     }
     return result;
+  }
+
+  /**
+   * Cross-tenant cron-time enqueue. Idempotent across leader
+   * transitions: dedupKey = `dreams_${YYYY-MM-DD}` so the unique
+   * index on (jobType, dedupKey) collapses a second firing into the
+   * first row instead of double-queueing.
+   */
+  private async enqueueDailyForAllTenants(): Promise<{ enqueued: number }> {
+    const tenants = this.apiKeys.knownCompanyIds();
+    const today = new Date().toISOString().slice(0, 10);
+    let enqueued = 0;
+    for (const companyId of tenants) {
+      try {
+        const { created } = await this.claim!.enqueue({
+          jobType: 'dreams',
+          companyId,
+          triggeredBy: 'cron',
+          dedupKey: `dreams_${today}`,
+          payload: { operations: [...this.defaultOps] },
+        });
+        if (created) enqueued++;
+      } catch (e) {
+        this.logger.warn(
+          `enqueue dreams for ${companyId} failed: ${(e as Error).message}`,
+        );
+      }
+    }
+    this.logger.log(
+      `Dreams cron enqueued ${enqueued}/${tenants.length} tenant job(s) for ${today}`,
+    );
+    return { enqueued };
+  }
+
+  /**
+   * Handler entry point — runs the actual dreams pipeline for ONE
+   * tenant as dispatched by the WorkerLoopService. The job_run row's
+   * status/result/error are managed by WorkerLoopService.dispatch —
+   * this method only does the work and surfaces stats. Honours
+   * ctx.abortSignal so a cross-pod cancel or pod shutdown propagates
+   * into the sub-services (when they support AbortSignal).
+   */
+  async executeFromQueue(
+    ctx: JobContext,
+  ): Promise<Record<string, unknown>> {
+    const opsRaw = ctx.payload?.operations as DreamsOperation[] | undefined;
+    const ops = opsRaw && opsRaw.length ? opsRaw : [...this.defaultOps];
+    const stats = await this.runForTenantInner(
+      ctx.companyId,
+      ops,
+      { triggeredBy: 'cron', triggeredByActor: ctx.workerId },
+      { skipJobRowLifecycle: true },
+    );
+    if (ctx.abortSignal.aborted) {
+      throw ctx.abortSignal.reason ?? new Error('aborted');
+    }
+    return {
+      durationSeconds: stats.durationSeconds,
+      identityLinksCreated: stats.dedup?.identityLinksCreated ?? 0,
+      resolutionsApplied: stats.resolve?.resolutionsApplied ?? 0,
+      summarized: stats.summarized ?? false,
+    };
   }
 
   /**
@@ -190,6 +290,7 @@ export class DreamsService {
       triggeredBy?: 'cron' | 'manual' | 'startup';
       triggeredByActor?: string;
     },
+    opts?: { skipJobRowLifecycle?: boolean },
   ): Promise<DreamsTenantStats> {
     const t0 = Date.now();
     const stats: DreamsTenantStats = {
@@ -197,20 +298,26 @@ export class DreamsService {
       durationSeconds: 0,
     };
     const opSet = new Set(operations);
+    // Queue mode (skipJobRowLifecycle): WorkerLoopService owns the
+    // job_run row's lifecycle — already wrote claimedBy/leaseUntil on
+    // claim, will write status='succeeded'/'failed' on dispatch return.
+    // We skip start()/finish() to avoid double-row + double-terminal.
     let jobRow: JobRunRow | null = null;
-    try {
-      jobRow =
-        (await this.jobs?.start({
-          jobType: 'dreams',
-          companyId,
-          triggeredBy: triggered?.triggeredBy ?? 'cron',
-          triggeredByActor: triggered?.triggeredByActor,
-          initialProgress: { operations: [...opSet] },
-        })) ?? null;
-    } catch (e) {
-      this.logger.warn(
-        `dreams job_run start failed for ${companyId}: ${(e as Error).message}`,
-      );
+    if (!opts?.skipJobRowLifecycle) {
+      try {
+        jobRow =
+          (await this.jobs?.start({
+            jobType: 'dreams',
+            companyId,
+            triggeredBy: triggered?.triggeredBy ?? 'cron',
+            triggeredByActor: triggered?.triggeredByActor,
+            initialProgress: { operations: [...opSet] },
+          })) ?? null;
+      } catch (e) {
+        this.logger.warn(
+          `dreams job_run start failed for ${companyId}: ${(e as Error).message}`,
+        );
+      }
     }
 
     try {

@@ -1,9 +1,14 @@
-import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
+import { Inject, Injectable, Logger, OnModuleInit, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Cron } from '@nestjs/schedule';
 import { ApiKeyService } from '../auth/api-key.service';
 import { SurrealService, dbCreate } from '../db/surreal.service';
 import { MetricsService } from '../metrics/metrics.service';
+import { JobClaimService } from '../jobs/job-claim.service';
+import {
+  WorkerLoopService,
+  type JobContext,
+} from '../jobs/worker-loop.service';
 import {
   ConcatSummaryGenerator,
   FactToSummarize,
@@ -47,7 +52,7 @@ export interface CompactionStats {
  * window finds zero new candidates.
  */
 @Injectable()
-export class CompactionService {
+export class CompactionService implements OnModuleInit {
   private readonly logger = new Logger(CompactionService.name);
   private readonly hotRetentionDays: number;
   private readonly summariesEnabled: boolean;
@@ -59,6 +64,8 @@ export class CompactionService {
     config: ConfigService,
     @Optional() private readonly metrics?: MetricsService,
     @Optional() @Inject(SUMMARY_GENERATOR) injectedGenerator?: SummaryGenerator,
+    @Optional() private readonly claim?: JobClaimService,
+    @Optional() private readonly workerLoop?: WorkerLoopService,
   ) {
     this.hotRetentionDays = parseInt(
       config.get<string>('COMPACTION_HOT_RETENTION_DAYS', '90'),
@@ -75,16 +82,46 @@ export class CompactionService {
     );
   }
 
+  onModuleInit(): void {
+    if (!this.workerLoop) return;
+    this.workerLoop.register(
+      'compaction',
+      async (ctx: JobContext) => {
+        const stats = await this.compactCompany(ctx.companyId);
+        return {
+          factsCompacted: stats.factsCompacted,
+          summariesCreated: stats.summariesCreated,
+          bytesFreed: stats.bytesFreed,
+        };
+      },
+      // Compaction can take several minutes on large tenants; ttl 15min
+      // gives the renew loop room while staying short enough that a
+      // crashed worker's row is reclaimed within one cycle of the
+      // zombie reaper.
+      { ttlSeconds: 900, maxAttempts: 2 },
+    );
+  }
+
   /**
    * Cron entry — daily at 03:17 UTC, off-peak for most regions.
    *
-   * Reentrancy: a manual /v1/admin/maintenance/compaction trigger (if
-   * we add one) MUST NOT overlap with the cron. Compaction rewrites
-   * fact status in place; two concurrent passes would re-compact
-   * already-compacted rows and double-bill summary generation.
+   * Queue mode (JobClaimService wired): enqueue one row per known
+   * tenant. WorkerLoopService dispatches; CAS handles multi-pod races.
+   *
+   * Legacy fallback (no claim service — single-process tests): keep
+   * the original in-flight bool guard so callers don't regress.
+   *
+   * Reentrancy: compaction rewrites fact status in place; two
+   * concurrent passes would re-compact already-compacted rows and
+   * double-bill summary generation. The dedupKey + UNIQUE(jobType,
+   * dedupKey) index makes the cron-time enqueue idempotent across
+   * leader transitions on the same day.
    */
   @Cron('17 3 * * *', { timeZone: 'UTC' })
-  async runDaily(): Promise<CompactionStats[]> {
+  async runDaily(): Promise<CompactionStats[] | { enqueued: number }> {
+    if (this.claim) {
+      return this.enqueueDailyForAllTenants();
+    }
     if (this.compactionInFlight) {
       this.logger.warn('compaction cron skipped — previous run still in flight');
       return [];
@@ -95,6 +132,31 @@ export class CompactionService {
     } finally {
       this.compactionInFlight = false;
     }
+  }
+
+  private async enqueueDailyForAllTenants(): Promise<{ enqueued: number }> {
+    const tenants = this.apiKeys.knownCompanyIds();
+    const today = new Date().toISOString().slice(0, 10);
+    let enqueued = 0;
+    for (const companyId of tenants) {
+      try {
+        const { created } = await this.claim!.enqueue({
+          jobType: 'compaction',
+          companyId,
+          triggeredBy: 'cron',
+          dedupKey: `compaction_${today}`,
+        });
+        if (created) enqueued++;
+      } catch (e) {
+        this.logger.warn(
+          `enqueue compaction for ${companyId} failed: ${(e as Error).message}`,
+        );
+      }
+    }
+    this.logger.log(
+      `Compaction cron enqueued ${enqueued}/${tenants.length} tenant job(s) for ${today}`,
+    );
+    return { enqueued };
   }
 
   private compactionInFlight = false;

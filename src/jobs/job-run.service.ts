@@ -13,6 +13,17 @@ export type JobType =
   | 'reindex_embeddings'
   | 'changefeed_drain';
 
+/** Stable list of registered job types — used for iteration without
+ *  duplicating the union elsewhere. */
+export const JOB_TYPES: readonly JobType[] = [
+  'dreams',
+  'compaction',
+  'calibration_refit',
+  'source_trust_refit',
+  'reindex_embeddings',
+  'changefeed_drain',
+];
+
 export type JobStatus =
   | 'pending'
   | 'running'

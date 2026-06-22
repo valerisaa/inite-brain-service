@@ -4,6 +4,7 @@ import { Cron, CronExpression } from '@nestjs/schedule';
 import { ApiKeyService } from '../auth/api-key.service';
 import { SurrealService } from '../db/surreal.service';
 import { MetricsService } from '../metrics/metrics.service';
+import { LeaderLeaseService } from '../jobs/leader-lease.service';
 
 /**
  * Periodic SurrealDB CHANGEFEED reader.
@@ -77,6 +78,7 @@ export class ChangefeedConsumerService {
     private readonly apiKeys: ApiKeyService,
     config: ConfigService,
     @Optional() private readonly metrics?: MetricsService,
+    @Optional() private readonly lease?: LeaderLeaseService,
   ) {
     this.enabled =
       config.get<string>('AUDIT_CHANGEFEED_ENABLED', '0') === '1';
@@ -89,9 +91,20 @@ export class ChangefeedConsumerService {
   // EVERY_MINUTE keeps lag bounded — see comment above. Operators
   // who want lower-latency audit replication can drop to every-30s
   // via the env knob below (a custom cron expression overrides).
+  //
+  // Multi-pod gate: take the `changefeed_consumer` leader_lease so
+  // only one pod drains the per-tenant SHOW CHANGES SINCE cursor at
+  // a time. Two pods racing the cursor would double-emit audit_event
+  // rows AND clobber each other's UPSERT of changefeed_state.
   @Cron(CronExpression.EVERY_MINUTE)
   async tick(): Promise<void> {
     if (!this.enabled || this.inFlight) return;
+    if (this.lease) {
+      // ttl=180s leaves 3x the 60s cron cadence as headroom — a GC pause
+      // can't strand the lease past the next tick attempt.
+      const got = await this.lease.tryAcquire('changefeed_consumer', 180);
+      if (!got) return;
+    }
     this.inFlight = true;
     let pendingThisTick = 0;
     let consumedThisTick = 0;
