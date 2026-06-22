@@ -2,6 +2,9 @@ import { NextRequest, NextResponse } from 'next/server'
 import { withAdmin } from '@/lib/server-auth'
 import { brainFetch } from '@/lib/brain-api'
 import { LeasesResponseSchema } from '@/lib/contracts/admin-leases'
+import { SchedulerResponseSchema } from '@/lib/contracts/admin-scheduler'
+import { ChangefeedStateResponseSchema } from '@/lib/contracts/admin-changefeed-state'
+import { JobsListResponseSchema } from '@/lib/contracts/admin-jobs'
 import type { ZodType } from 'zod'
 
 /**
@@ -16,6 +19,9 @@ import type { ZodType } from 'zod'
  */
 const RESPONSE_SCHEMAS: Record<string, ZodType> = {
   'v1/admin/leases': LeasesResponseSchema,
+  'v1/admin/scheduler': SchedulerResponseSchema,
+  'v1/admin/changefeed/state': ChangefeedStateResponseSchema,
+  'v1/admin/jobs': JobsListResponseSchema,
 }
 
 /**

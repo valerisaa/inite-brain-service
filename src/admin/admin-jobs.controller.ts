@@ -39,6 +39,9 @@ import {
   ScenarioRunOutcome,
 } from './scenario-runner.service';
 import type { LeasesResponse } from '../contracts/admin/leases.schema';
+import type { SchedulerResponse } from '../contracts/admin/scheduler.schema';
+import type { ChangefeedStateResponse } from '../contracts/admin/changefeed-state.schema';
+import type { JobsListResponse } from '../contracts/admin/jobs.schema';
 
 /**
  * Scheduler / jobs / maintenance surface.
@@ -87,7 +90,7 @@ export class AdminJobsController {
     @Query('since') since?: string,
     @Query('companyId') companyId?: string,
     @Query('limit') limit?: string,
-  ) {
+  ): Promise<JobsListResponse> {
     const parsedLimit = limit ? parseInt(limit, 10) : undefined;
     const rows = await this.jobs.list({
       jobType: (jobType?.trim() as JobType) || undefined,
@@ -99,7 +102,7 @@ export class AdminJobsController {
           ? parsedLimit
           : undefined,
     });
-    return { jobs: rows };
+    return { jobs: rows } satisfies JobsListResponse;
   }
 
   @Get('jobs/:runId')
@@ -147,17 +150,7 @@ export class AdminJobsController {
    */
   @Get('scheduler')
   @RequireScopes('brain:admin')
-  scheduler_(): {
-    cron: Array<{
-      name: string;
-      cronTime: string;
-      lastFireAt: string | null;
-      nextFireAt: string | null;
-      running: boolean;
-    }>;
-    intervals: string[];
-    timeouts: string[];
-  } {
+  scheduler_(): SchedulerResponse {
     const cronEntries: Array<{
       name: string;
       cronTime: string;
@@ -214,7 +207,7 @@ export class AdminJobsController {
       cron: cronEntries,
       intervals: [...this.scheduler.getIntervals()],
       timeouts: [...this.scheduler.getTimeouts()],
-    };
+    } satisfies SchedulerResponse;
   }
 
   // ── Manual triggers ──────────────────────────────────────────────
@@ -580,12 +573,17 @@ export class AdminJobsController {
 
   @Get('changefeed/state')
   @RequireScopes('brain:admin')
-  async changefeedState() {
+  async changefeedState(): Promise<ChangefeedStateResponse> {
     const [stats, cursors] = await Promise.all([
       this.changefeed.stats(),
       this.changefeed.cursorState(),
     ]);
-    return { stats, cursors };
+    // sources is readonly string[] on the service to keep callers from
+    // mutating the constant; on the wire it's just an array.
+    return {
+      stats: { ...stats, sources: [...stats.sources] },
+      cursors,
+    } satisfies ChangefeedStateResponse;
   }
 
   @Post('changefeed/drain')

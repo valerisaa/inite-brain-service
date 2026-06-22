@@ -12,28 +12,9 @@ import {
 } from 'lucide-react'
 import { JsonView } from './JsonView'
 import { getMessages, normalizeLang } from '../../lib/i18n'
+import type { JobRow } from '../../lib/contracts/admin-jobs'
 
 type AdminT = ReturnType<typeof getMessages>['admin']
-
-interface JobRow {
-  runId: string
-  jobType: string
-  status: 'pending' | 'running' | 'succeeded' | 'failed' | 'cancelled'
-  triggeredBy: 'cron' | 'manual' | 'startup'
-  triggeredByActor?: string | null
-  startedAt: string
-  finishedAt?: string | null
-  progress?: Record<string, unknown> | null
-  payload?: Record<string, unknown> | null
-  result?: Record<string, unknown> | null
-  error?: { message: string; name?: string } | null
-  cancelRequested?: boolean
-  attempts?: number
-  claimedBy?: string | null
-  leaseUntil?: string | null
-  visibleAfter?: string | null
-  companyId: string
-}
 
 const JOB_TYPES = [
   '',

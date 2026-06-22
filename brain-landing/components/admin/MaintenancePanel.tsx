@@ -18,45 +18,11 @@ import {
   XCircle,
 } from 'lucide-react'
 import { getMessages, normalizeLang } from '../../lib/i18n'
+import type { SchedulerResponse } from '../../lib/contracts/admin-scheduler'
+import type { ChangefeedStateResponse } from '../../lib/contracts/admin-changefeed-state'
+import type { JobRow } from '../../lib/contracts/admin-jobs'
 
 type AdminT = ReturnType<typeof getMessages>['admin']
-
-interface CronEntry {
-  name: string
-  cronTime: string
-  lastFireAt: string | null
-  nextFireAt: string | null
-  running: boolean
-}
-
-interface JobRow {
-  runId: string
-  jobType: string
-  status: 'pending' | 'running' | 'succeeded' | 'failed' | 'cancelled'
-  triggeredBy: 'cron' | 'manual' | 'startup'
-  triggeredByActor?: string | null
-  startedAt: string
-  finishedAt?: string | null
-  progress?: Record<string, unknown> | null
-  result?: Record<string, unknown> | null
-  error?: { message: string; name?: string } | null
-  companyId: string
-}
-
-interface ChangefeedState {
-  stats: {
-    enabled: boolean
-    inFlight: boolean
-    lastTickAt: string | null
-    lastPendingRemaining: number
-    totalConsumed: number
-    tickCount: number
-    lastError: { message: string; ts: string } | null
-    sources: readonly string[]
-    perBatchLimit: number
-  }
-  cursors: Array<{ companyId: string; source: string; cursor: number }>
-}
 
 /**
  * Operator-daily cockpit. Five maintenance jobs (4 cron + changefeed
@@ -69,9 +35,11 @@ export function MaintenancePanel() {
   const params = useParams<{ lang: string }>()
   const lang = normalizeLang(params?.lang)
   const t = getMessages(lang).admin
-  const [scheduler, setScheduler] = useState<{ cron: CronEntry[] } | null>(null)
+  const [scheduler, setScheduler] = useState<SchedulerResponse | null>(null)
   const [recentJobs, setRecentJobs] = useState<JobRow[]>([])
-  const [changefeed, setChangefeed] = useState<ChangefeedState | null>(null)
+  const [changefeed, setChangefeed] = useState<ChangefeedStateResponse | null>(
+    null,
+  )
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
