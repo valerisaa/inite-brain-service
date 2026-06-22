@@ -1,12 +1,14 @@
 import { Injectable, Logger, Optional } from '@nestjs/common';
 import { hostname } from 'node:os';
 import { randomUUID } from 'node:crypto';
+import { context, propagation, trace } from '@opentelemetry/api';
 import {
   SurrealService,
   runTransaction,
   retryOnUniqueViolation,
   isUniqueViolation,
 } from '../db/surreal.service';
+import { withSpan } from '../common/tracing';
 import type { JobType, JobStatus } from './job-run.service';
 
 export interface JobClaim {
@@ -21,6 +23,13 @@ export interface JobClaim {
   payload: Record<string, unknown> | null;
   /** Lease deadline. Handler MUST renew before this passes. */
   leaseUntil: string;
+  /**
+   * W3C traceparent injected at enqueue time by the producer's span
+   * context. Used by WorkerLoopService.dispatch to link the consumer
+   * span as a child of the producer, so trace viewers stitch the
+   * full publish→queue→process waterfall together.
+   */
+  traceparent?: string;
 }
 
 /**
@@ -79,6 +88,13 @@ export class JobClaimService {
     }
     const runId = randomUUID();
     const visibleAfterIso = (input.visibleAfter ?? new Date()).toISOString();
+    // Capture the active W3C trace context (if any) so the consumer
+    // span can attach as a child. Empty carrier outside an active
+    // span — that's fine, the field stays unset and the consumer
+    // starts a fresh root.
+    const carrier: Record<string, string> = {};
+    propagation.inject(context.active(), carrier);
+    const traceparent = carrier.traceparent;
     // SurrealDB v2 distinguishes NONE from NULL on `option<T>` fields
     // (especially indexed ones): passing JS null surfaces as
     // "Found NULL … expected option<T>". Build CONTENT incrementally
@@ -112,15 +128,37 @@ export class JobClaimService {
       fields.push(`dedupKey: $dedupKey`);
       params.dedupKey = input.dedupKey;
     }
+    if (traceparent) {
+      fields.push(`traceparent: $traceparent`);
+      params.traceparent = traceparent;
+    }
     try {
-      const created = await retryOnUniqueViolation(() =>
-        this.surreal!.withCompany(input.companyId, async (db) => {
-          await db.query(
-            `CREATE job_run CONTENT { ${fields.join(', ')} }`,
-            params,
-          );
-          return true;
-        }),
+      // OTel messaging.publish span — wraps the CREATE so the trace
+      // viewer shows the producer side. Semantic conventions:
+      // messaging.system = 'surrealdb', destination.name = jobType,
+      // message.id = runId.
+      const created = await withSpan(
+        'jobs.enqueue',
+        () =>
+          retryOnUniqueViolation(() =>
+            this.surreal!.withCompany(input.companyId, async (db) => {
+              await db.query(
+                `CREATE job_run CONTENT { ${fields.join(', ')} }`,
+                params,
+              );
+              return true;
+            }),
+          ),
+        {
+          'messaging.system': 'surrealdb',
+          'messaging.operation': 'publish',
+          'messaging.destination.name': input.jobType,
+          'messaging.destination.kind': 'queue',
+          'messaging.message.id': runId,
+          'job.companyId': input.companyId,
+          'job.triggeredBy': input.triggeredBy,
+          ...(input.dedupKey ? { 'job.dedupKey': input.dedupKey } : {}),
+        },
       );
       return { runId, created };
     } catch (e) {
@@ -193,6 +231,10 @@ export class JobClaimService {
             attempts: Number(row.attempts ?? 1),
             payload: (row.payload as Record<string, unknown> | null) ?? null,
             leaseUntil: new Date(row.leaseUntil as string).toISOString(),
+            traceparent:
+              typeof row.traceparent === 'string'
+                ? row.traceparent
+                : undefined,
           } satisfies JobClaim;
         }),
       );

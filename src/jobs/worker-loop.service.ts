@@ -7,6 +7,7 @@ import {
   Optional,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { context, propagation, trace, SpanStatusCode } from '@opentelemetry/api';
 import { ApiKeyService } from '../auth/api-key.service';
 import { JobClaimService, type JobClaim } from './job-claim.service';
 import { LeaderLeaseService } from './leader-lease.service';
@@ -343,10 +344,55 @@ export class WorkerLoopService
    * Run a single claim. Owns the renew interval (which doubles as the
    * cross-pod cancel poll), wraps the handler in an AbortController,
    * and routes the outcome to complete / fail / cancelled.
+   *
+   * OTel: extract the producer-side traceparent injected at enqueue
+   * (when present) and run the whole dispatch inside that context so
+   * the consumer span links back. With OTEL_ENABLED=0 the API surface
+   * is a no-op tracer and the wrap costs essentially nothing.
    */
   private async dispatch(
     claim: JobClaim,
     reg: RegisteredHandler,
+  ): Promise<void> {
+    const parentCtx = claim.traceparent
+      ? propagation.extract(context.active(), {
+          traceparent: claim.traceparent,
+        })
+      : context.active();
+    return context.with(parentCtx, () => this.dispatchInner(claim, reg));
+  }
+
+  private async dispatchInner(
+    claim: JobClaim,
+    reg: RegisteredHandler,
+  ): Promise<void> {
+    const tracer = trace.getTracer('inite-brain-service');
+    const span = tracer.startSpan(`jobs.process ${claim.jobType}`, {
+      attributes: {
+        'messaging.system': 'surrealdb',
+        'messaging.operation': 'process',
+        'messaging.destination.name': claim.jobType,
+        'messaging.destination.kind': 'queue',
+        'messaging.message.id': claim.runId,
+        'job.companyId': claim.companyId,
+        'job.attempts': claim.attempts,
+        'job.workerId': this.claim!.identity(),
+        'job.cpuBound': reg.cpuBound === true,
+      },
+    });
+    try {
+      await context.with(trace.setSpan(context.active(), span), () =>
+        this.dispatchBody(claim, reg, span),
+      );
+    } finally {
+      span.end();
+    }
+  }
+
+  private async dispatchBody(
+    claim: JobClaim,
+    reg: RegisteredHandler,
+    consumerSpan: ReturnType<ReturnType<typeof trace.getTracer>['startSpan']>,
   ): Promise<void> {
     const handlerAbort = new AbortController();
     // Pod shutdown propagates into the handler.
@@ -406,6 +452,7 @@ export class WorkerLoopService
           : await reg.handler(ctx);
       clearInterval(renewTimer);
       if (cancelRequested) {
+        consumerSpan.setAttribute('job.outcome', 'cancelled');
         await this.claim!.cancelled({
           companyId: claim.companyId,
           recordId: claim.recordId,
@@ -414,10 +461,12 @@ export class WorkerLoopService
       } else if (lostClaim) {
         // Don't write — another worker owns the row now. The
         // duplicate-work cost was already paid; just bail.
+        consumerSpan.setAttribute('job.outcome', 'lost_claim');
         this.logger.warn(
           `Claim ${claim.runId} lost mid-handler; skipping terminal write`,
         );
       } else {
+        consumerSpan.setAttribute('job.outcome', 'succeeded');
         await this.claim!.complete({
           companyId: claim.companyId,
           recordId: claim.recordId,
@@ -427,17 +476,22 @@ export class WorkerLoopService
     } catch (err) {
       clearInterval(renewTimer);
       const e = err as Error;
+      consumerSpan.recordException(e);
       if (cancelRequested) {
+        consumerSpan.setAttribute('job.outcome', 'cancelled');
         await this.claim!.cancelled({
           companyId: claim.companyId,
           recordId: claim.recordId,
           result: { reason: 'cancel_requested', message: e.message },
         });
       } else if (lostClaim) {
+        consumerSpan.setAttribute('job.outcome', 'lost_claim');
         this.logger.warn(
           `Claim ${claim.runId} lost mid-handler (handler threw): ${e.message}`,
         );
       } else {
+        consumerSpan.setAttribute('job.outcome', 'failed');
+        consumerSpan.setStatus({ code: SpanStatusCode.ERROR, message: e.message });
         await this.claim!.fail({
           companyId: claim.companyId,
           recordId: claim.recordId,
