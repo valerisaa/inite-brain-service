@@ -301,17 +301,32 @@ export class JobClaimService {
     if (!this.surreal) return;
     try {
       await this.surreal.withCompany(input.companyId, async (db) => {
-        await db.query(
+        const [rows] = (await db.query<any[]>(
+          // Ownership guard: only write the terminal status if WE still
+          // own the running row. A worker that GC-paused past its lease,
+          // got zombie-reaped, and had the row re-claimed by another pod
+          // must NOT stomp the new owner's running claim — that would
+          // corrupt status and double-count execution. 0 rows affected
+          // ⇒ claim lost; skip silently (the dup-work cost is already
+          // paid by the time we get here).
           `UPDATE type::thing($rid) SET
               status = 'succeeded',
               finishedAt = time::now(),
               result = $result,
-              claimedBy = NONE, leaseUntil = NONE`,
+              claimedBy = NONE, leaseUntil = NONE
+            WHERE claimedBy = $me AND status = 'running'
+            RETURN id`,
           {
             rid: input.recordId,
+            me: this.workerId,
             result: input.result ?? null,
           },
-        );
+        )) as any[];
+        if (((rows ?? []) as unknown[]).length === 0) {
+          this.logger.warn(
+            `complete(${input.recordId}) no-op — claim no longer owned by ${this.workerId}; another worker re-claimed it`,
+          );
+        }
       });
     } catch (e) {
       this.logger.warn(
@@ -340,39 +355,59 @@ export class JobClaimService {
     const willRequeue =
       input.requeue !== false && input.attempts < maxAttempts;
     try {
-      await this.surreal.withCompany(input.companyId, async (db) => {
-        if (willRequeue) {
-          const baseMs = input.backoffBaseMs ?? 30_000;
-          // Exponential backoff with full jitter; cap at 1h.
-          const backoffMs = Math.min(
-            baseMs * Math.pow(2, input.attempts - 1) *
-              (0.5 + Math.random() * 0.5),
-            3_600_000,
-          );
-          const visibleAfter = new Date(Date.now() + backoffMs).toISOString();
-          await db.query(
-            `UPDATE type::thing($rid) SET
-                status = 'pending',
-                error = $err,
-                claimedBy = NONE, leaseUntil = NONE,
-                visibleAfter = type::datetime($visibleAfter)`,
-            {
-              rid: input.recordId,
-              err: input.error,
-              visibleAfter,
-            },
-          );
-        } else {
-          await db.query(
+      // Ownership guard on both arms: a zombie-reaped, re-claimed row
+      // must not be requeued or terminal-failed out from under the new
+      // owner. 0 rows affected ⇒ claim lost; report requeued: false.
+      const affected = await this.surreal.withCompany(
+        input.companyId,
+        async (db) => {
+          if (willRequeue) {
+            const baseMs = input.backoffBaseMs ?? 30_000;
+            // Exponential backoff with full jitter; cap at 1h.
+            const backoffMs = Math.min(
+              baseMs * Math.pow(2, input.attempts - 1) *
+                (0.5 + Math.random() * 0.5),
+              3_600_000,
+            );
+            const visibleAfter = new Date(
+              Date.now() + backoffMs,
+            ).toISOString();
+            const [rows] = (await db.query<any[]>(
+              `UPDATE type::thing($rid) SET
+                  status = 'pending',
+                  error = $err,
+                  claimedBy = NONE, leaseUntil = NONE,
+                  visibleAfter = type::datetime($visibleAfter)
+                WHERE claimedBy = $me AND status = 'running'
+                RETURN id`,
+              {
+                rid: input.recordId,
+                me: this.workerId,
+                err: input.error,
+                visibleAfter,
+              },
+            )) as any[];
+            return ((rows ?? []) as unknown[]).length;
+          }
+          const [rows] = (await db.query<any[]>(
             `UPDATE type::thing($rid) SET
                 status = 'failed',
                 finishedAt = time::now(),
                 error = $err,
-                claimedBy = NONE, leaseUntil = NONE`,
-            { rid: input.recordId, err: input.error },
-          );
-        }
-      });
+                claimedBy = NONE, leaseUntil = NONE
+              WHERE claimedBy = $me AND status = 'running'
+              RETURN id`,
+            { rid: input.recordId, me: this.workerId, err: input.error },
+          )) as any[];
+          return ((rows ?? []) as unknown[]).length;
+        },
+      );
+      if (affected === 0) {
+        this.logger.warn(
+          `fail(${input.recordId}) no-op — claim no longer owned by ${this.workerId}; another worker re-claimed it`,
+        );
+        return { requeued: false };
+      }
       return { requeued: willRequeue };
     } catch (e) {
       this.logger.warn(
@@ -395,14 +430,22 @@ export class JobClaimService {
     if (!this.surreal) return;
     try {
       await this.surreal.withCompany(input.companyId, async (db) => {
-        await db.query(
+        const [rows] = (await db.query<any[]>(
+          // Ownership guard — same rationale as complete()/fail().
           `UPDATE type::thing($rid) SET
               status = 'cancelled',
               finishedAt = time::now(),
               result = $result,
-              claimedBy = NONE, leaseUntil = NONE`,
-          { rid: input.recordId, result: input.result ?? null },
-        );
+              claimedBy = NONE, leaseUntil = NONE
+            WHERE claimedBy = $me AND status = 'running'
+            RETURN id`,
+          { rid: input.recordId, me: this.workerId, result: input.result ?? null },
+        )) as any[];
+        if (((rows ?? []) as unknown[]).length === 0) {
+          this.logger.warn(
+            `cancelled(${input.recordId}) no-op — claim no longer owned by ${this.workerId}; another worker re-claimed it`,
+          );
+        }
       });
     } catch (e) {
       this.logger.warn(

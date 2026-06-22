@@ -162,7 +162,8 @@ describe('JobClaimService', () => {
     const db = {
       query: async (sql: string, _params?: Record<string, unknown>) => {
         if (sql.includes('UPDATE')) updateSql = sql;
-        return [[]];
+        // Non-empty ⇒ the ownership-guarded UPDATE matched our row.
+        return [[{ id: 'job_run:abc' }]];
       },
     };
     const svc = new JobClaimService(mkSurreal(db));
@@ -176,6 +177,8 @@ describe('JobClaimService', () => {
     expect(out.requeued).toBe(true);
     expect(updateSql).toContain("status = 'pending'");
     expect(updateSql).toContain('visibleAfter');
+    // Ownership guard present so a re-claimed row can't be stomped.
+    expect(updateSql).toContain("claimedBy = $me AND status = 'running'");
   });
 
   it('fail terminal-fails at maxAttempts', async () => {
@@ -183,7 +186,7 @@ describe('JobClaimService', () => {
     const db = {
       query: async (sql: string, _params?: Record<string, unknown>) => {
         if (sql.includes('UPDATE')) updateSql = sql;
-        return [[]];
+        return [[{ id: 'job_run:abc' }]];
       },
     };
     const svc = new JobClaimService(mkSurreal(db));
@@ -196,6 +199,41 @@ describe('JobClaimService', () => {
     });
     expect(out.requeued).toBe(false);
     expect(updateSql).toContain("status = 'failed'");
+    expect(updateSql).toContain("claimedBy = $me AND status = 'running'");
+  });
+
+  it('fail reports requeued=false when the guarded UPDATE matches no row (claim lost to a re-claim)', async () => {
+    const db = {
+      query: async (_sql: string, _params?: Record<string, unknown>) =>
+        [[]], // 0 rows affected ⇒ we no longer own the running claim
+    };
+    const svc = new JobClaimService(mkSurreal(db));
+    const out = await svc.fail({
+      companyId: 'co_x',
+      recordId: 'job_run:abc',
+      attempts: 1,
+      error: { message: 'boom' },
+      maxAttempts: 3,
+    });
+    expect(out.requeued).toBe(false);
+  });
+
+  it('complete and cancelled guard the terminal write on ownership', async () => {
+    const sqls: string[] = [];
+    const db = {
+      query: async (sql: string, _params?: Record<string, unknown>) => {
+        sqls.push(sql);
+        return [[{ id: 'job_run:abc' }]];
+      },
+    };
+    const svc = new JobClaimService(mkSurreal(db));
+    await svc.complete({ companyId: 'co_x', recordId: 'job_run:abc' });
+    await svc.cancelled({ companyId: 'co_x', recordId: 'job_run:abc' });
+    expect(sqls).toHaveLength(2);
+    expect(sqls[0]).toContain("status = 'succeeded'");
+    expect(sqls[0]).toContain("claimedBy = $me AND status = 'running'");
+    expect(sqls[1]).toContain("status = 'cancelled'");
+    expect(sqls[1]).toContain("claimedBy = $me AND status = 'running'");
   });
 
   it('reapZombies routes below-maxAttempts rows to requeue and at-max to fail', async () => {

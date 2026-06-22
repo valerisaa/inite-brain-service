@@ -49,7 +49,7 @@ describe('write-side wire contracts', () => {
     const surreal = {
       dropCompanyDatabase: async () => undefined,
     } as never;
-    // eslint-disable-next-line max-params
+     
     const ctl = new AdminController(
       undef, undef, surreal, undef, undef, undef, undef, undef, undef, undef,
     );
@@ -73,7 +73,7 @@ describe('write-side wire contracts', () => {
         },
       }),
     } as never;
-    // eslint-disable-next-line max-params
+     
     const ctl = new AdminController(
       undef, dreams, undef, undef, undef, undef, undef, undef, undef, undef,
     );
@@ -95,7 +95,7 @@ describe('write-side wire contracts', () => {
         provider: 'bge-m3',
       }),
     } as never;
-    // eslint-disable-next-line max-params
+     
     const ctl = new AdminController(
       undef, undef, undef, undef, undef, undef, undef, reindex, undef, undef,
     );
@@ -116,7 +116,7 @@ describe('write-side wire contracts', () => {
     const jobs = {
       requestCancel: async () => true,
     } as never;
-    // eslint-disable-next-line max-params
+     
     const ctl = new AdminJobsController(
       jobs, undef, undef, undef, undef, undef, undef, undef, undef, undef,
       undef, undef, undef, undef, undef,
@@ -132,7 +132,7 @@ describe('write-side wire contracts', () => {
     const dreams = {
       runForTenant: async () => ({}),
     } as never;
-    // eslint-disable-next-line max-params
+     
     const ctl = new AdminJobsController(
       undef, dreams, undef, undef, undef, undef, undef, undef, undef, undef,
       undef, undef, undef, undef, undef,
@@ -151,7 +151,7 @@ describe('write-side wire contracts', () => {
     const compaction = {
       compactCompany: async () => undefined,
     } as never;
-    // eslint-disable-next-line max-params
+     
     const ctl = new AdminJobsController(
       undef, undef, undef, undef, undef, undef, apiKeys, undef, undef,
       undef, undef, undef, undef, compaction, undef,
@@ -172,7 +172,7 @@ describe('write-side wire contracts', () => {
       refitCalibration: async () => undefined,
       refitSourceTrust: async () => undefined,
     } as never;
-    // eslint-disable-next-line max-params
+     
     const ctl = new AdminJobsController(
       undef, undef, refit, undef, undef, undef, undef, undef, undef,
       undef, undef, undef, undef, undef, undef,
@@ -196,7 +196,7 @@ describe('write-side wire contracts', () => {
         tenants: 2,
       }),
     } as never;
-    // eslint-disable-next-line max-params
+     
     const ctl = new AdminJobsController(
       undef, undef, undef, changefeed, undef, undef, undef, undef, undef,
       undef, undef, undef, undef, undef, undef,
