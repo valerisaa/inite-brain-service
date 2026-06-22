@@ -522,6 +522,34 @@ export class IngestService {
       const fromId = await this.resolveOrCreateBareRef(db, dto.from as any);
       const toId = await this.resolveOrCreateBareRef(db, dto.to as any);
 
+      // identity_of cycle-guard. The merge sets toId.mergedInto = fromId.
+      // If fromId already resolves (transitively) back to toId, both ends end
+      // up mergedInto-set and BOTH vanish from retrieval (`WHERE mergedInto IS
+      // NONE`), since survivor resolution is single-hop. Reject before any
+      // write so nothing is created on a contradictory link.
+      if (dto.kind === 'identity_of') {
+        if (fromId === toId) {
+          throw new BadRequestException(
+            'identity_of cannot merge an entity into itself',
+          );
+        }
+        let cursor: string | null = fromId;
+        for (let hops = 0; cursor && hops < 32; hops++) {
+          const [rows] = await db.query<[Array<{ mergedInto: unknown }>]>(
+            `SELECT mergedInto FROM $e`,
+            { e: new StringRecordId(cursor) },
+          );
+          const next = (rows as Array<{ mergedInto: unknown }>)?.[0]
+            ?.mergedInto;
+          cursor = next ? String(next) : null;
+          if (cursor === toId) {
+            throw new BadRequestException(
+              'identity_of would create a merge cycle (survivor already resolves to the loser)',
+            );
+          }
+        }
+      }
+
       // Idempotent edge insert. UNIQUE on (in, out, kind) means the second
       // insert of the same conceptual edge raises a unique violation; we
       // catch it and return the existing edge so duplicate webhook replays
