@@ -11,6 +11,7 @@ import {
 import {
   CalibrationService,
   BOOTSTRAP_PROMPT_HASH,
+  BOOTSTRAP_PROMPT_KEY,
 } from './calibration.service';
 import { JobRunService } from '../../jobs/job-run.service';
 import { JobClaimService } from '../../jobs/job-claim.service';
@@ -393,7 +394,12 @@ export class CalibrationRefitService implements OnModuleInit {
       }
       const map = fitIsotonic(allPairs);
       await this.persistCalibrationMap(map);
-      this.calibration.loadMap(this.extractorModel, this.bootstrapPromptKey, map);
+      // loadMap re-hashes its promptText arg internally (cacheKey →
+      // promptHashOf), and calibrate() reads with promptHashOf('bootstrap').
+      // So pass the RAW literal here, NOT bootstrapPromptKey (which is the
+      // already-hashed DB key) — otherwise the map lands under
+      // promptHashOf(HASH) and the in-process hot-reload never hits.
+      this.calibration.loadMap(this.extractorModel, BOOTSTRAP_PROMPT_KEY, map);
       this.logger.log(
         `calibration refit complete — samples=${map.sampleCount} bins=${map.thresholds.length}`,
       );

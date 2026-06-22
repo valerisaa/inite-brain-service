@@ -14,6 +14,7 @@
 import {
   CalibrationService,
   BOOTSTRAP_PROMPT_HASH,
+  BOOTSTRAP_PROMPT_KEY,
   promptHashOf,
 } from '../src/ai/calibration/calibration.service';
 import { CalibrationRefitService } from '../src/ai/calibration/calibration-refit.service';
@@ -74,5 +75,26 @@ describe('calibration bootstrap promptHash — persist/load contract', () => {
     // the SHA-256 slice that the runtime calibrate() path also derives.
     expect(BOOTSTRAP_PROMPT_HASH).toBe(promptHashOf('bootstrap'));
     expect(BOOTSTRAP_PROMPT_HASH).not.toBe('bootstrap');
+  });
+
+  describe('loadMap ↔ calibrate cache-key contract (no double-hash)', () => {
+    const map = { thresholds: [1], values: [0.42], sampleCount: 99 };
+
+    it('a map loaded under BOOTSTRAP_PROMPT_KEY is read by calibrate default', () => {
+      // This is the key the refit MUST pass to loadMap. loadMap re-hashes
+      // internally, and calibrate(default promptText='bootstrap') reads
+      // promptHashOf('bootstrap') — so the raw literal must round-trip.
+      const svc = new CalibrationService(config);
+      svc.loadMap('gpt-test', BOOTSTRAP_PROMPT_KEY, map as any);
+      expect(svc.calibrate(0.9, 'gpt-test')).toBe(0.42);
+    });
+
+    it('loading under the already-hashed key MISSES calibrate (documents the trap)', () => {
+      // Passing BOOTSTRAP_PROMPT_HASH to loadMap (which re-hashes) lands
+      // the map under promptHashOf(HASH) — the exact double-hash bug.
+      const svc = new CalibrationService(config);
+      svc.loadMap('gpt-test', BOOTSTRAP_PROMPT_HASH, map as any);
+      expect(svc.calibrate(0.9, 'gpt-test')).not.toBe(0.42);
+    });
   });
 });
