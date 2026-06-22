@@ -1,0 +1,73 @@
+# Словарь предикатов
+
+Предикат — это глагол факта: `name`, `email`, `tier`, `complained_about`. Brain решает, как сливать факты, по политикам на каждый предикат, заданным заранее, а не выведенным на лету при ингесте. Сам словарь определён в `inite-ecosystem/core/capabilities/knowledge.yaml`.
+
+## Три семантических режима
+
+| Семантика | Поведение | Примеры |
+| --- | --- | --- |
+| `single_active` | Активно только одно значение. Новый ингест замещает прежнее. | `name`, `email`, `phone`, `dob` |
+| `bitemporal` | У значений явные окна; пересечение идёт через conflict-resolver. | `status`, `intent`, `address`, `tier` |
+| `append_only` | Не конфликтует никогда; каждый ингест добавляется. | `said`, `mentioned_in`, `tag` |
+
+`single_active` — самая простая модель чтения: бери строку с наибольшим `validFrom`. `bitemporal` — самая выразительная: один предикат может быть верен на нескольких непересекающихся окнах. `append_only` — для предикатов высказываний и тегов, где нет понятия «того самого» значения.
+
+## Период полураспада (decay)
+
+У каждого предиката есть `decay_halflife_days`. Множитель к retrieval-score:
+
+```
+decay = 0.5 ^ (age_days / halflife_days)
+```
+
+Предикаты с коротким полураспадом (например, `status: 7d`) гаснут быстро — статус недельной давности значит меньше, чем сегодняшний. Длинный полураспад (`address: 90d`, `dob: never`) держит вес сколь угодно долго.
+
+## PII-класс
+
+Гейтинг по scope на каждый предикат. Условие `PERMISSIONS` на уровне БД проверяет `$caller_scopes`:
+
+| PII-класс | Предикаты | Нужный scope |
+| --- | --- | --- |
+| `none` | `status`, `intent`, `tier`, `tag` | `brain:read` |
+| `text` | `said`, `comment`, `review` | `brain:read` |
+| `behavioral` | `intent`, `preference`, `interacted_with` | `brain:read` |
+| `identifier` | `name`, `phone-public` | `brain:read` |
+| `sensitive` | `email`, `phone`, `address`, `dob` | `brain:read_pii` |
+
+Вызывающий без scope всё равно видит, что предикат существует; поле `object` приходит `null`. Так не утекает даже *форма* PII тем, у кого нет прав на PII.
+
+## Контент-предикаты v1.1
+
+Добавлены в `feat/v1.1-content-predicates`. Семантика первого класса для контента:
+
+| Предикат | Семантика | Decay | PII |
+| --- | --- | --- | --- |
+| `comment` | `append_only` | 30d | text |
+| `review` | `bitemporal` | 90d | text |
+| `tag` | `append_only` | never | none |
+| `brand` | `single_active` | never | none |
+| `category` | `bitemporal` | 60d | none |
+| `rating` | `bitemporal` | 30d | none |
+
+Conflict-resolver, NLU-экстрактор и роутер предикатов знают о них все — см. [запись в реестре контент-предикатов v1.1](https://github.com/inite-ai/inite-brain-service/blob/feat/v1.1-content-predicates/src/db/migrations/0010-content-predicates.sql) (только комментированный DDL, миграция ничего не стоит).
+
+## Чтение полной таблицы
+
+Resolver грузит словарь на старте. Переопредели на тенанта через механизм `inheritance` из спеки, если вертикали нужна своя семантика, — но дефолтный словарь покрывает кросс-вертикальную поверхность.
+
+```ts
+import { vocabulary } from '@inite/knowledge/vocabulary'
+console.log(vocabulary.predicates.tier)
+// {
+//   semantic: 'bitemporal',
+//   decayHalflifeDays: 30,
+//   piiClass: 'none',
+//   sourceTrust: { rent: 0.9, inbox: 0.4 }
+// }
+```
+
+## Связанное
+
+- [Разрешение конфликтов](/ru/docs/concepts/conflict-resolution) — как resolver считает score
+- [Битемпоральная модель](/ru/docs/concepts/bitemporal) — семантика интервалов Аллена
+- [POST /v1/ingest](/ru/docs/api/ingest) — что идёт через resolver

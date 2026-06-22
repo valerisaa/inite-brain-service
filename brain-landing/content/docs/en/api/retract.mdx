@@ -1,8 +1,3 @@
-export const metadata = {
-  title: 'POST /v1/facts/:id/retract · INITE Brain Docs',
-  description: 'Mark a fact retracted. Survives in audit trail with reason.',
-}
-
 # POST /v1/facts/:id/retract
 
 Mark a fact as no longer believed. Different from forget — retract is a transaction-time operation that stays auditable. The fact stays in the timeline with `status: 'retracted'` and a `retractedAt` timestamp.

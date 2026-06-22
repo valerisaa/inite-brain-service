@@ -1,0 +1,71 @@
+# С чего начать
+
+Пять минут от «у меня есть API-ключ» до «я нахожу то, что только что заингестил».
+
+## Что нужно сначала — API-ключ
+
+Brain не принимает анонимный трафик. Получить ключ можно двумя путями:
+
+- **Self-host (dev)** — пропиши `BRAIN_API_KEYS` в `.env` по рецепту локальной разработки из [`inite-brain-service/README.md`](https://github.com/inite-ai/inite-brain-service).
+- **Хостинг** — сгенерируй на `https://brain.inite.ai/admin/keys`. Получишь строку вида `brain_<base64>` и `companyId`. Держи их в паре — путь MCP свой на каждого тенанта.
+
+Примеры ниже считают, что заданы:
+
+```bash
+export BRAIN_KEY="brain_..."
+export BRAIN_URL="https://brain.inite.ai"
+```
+
+## 1. Заингестить один факт
+
+```bash
+curl -X POST "$BRAIN_URL/v1/ingest/fact" \
+  -H "Authorization: Bearer $BRAIN_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "entityRef": { "vertical": "rent", "id": "cust_42" },
+    "predicate": "complained_about",
+    "object": "late maintenance response",
+    "validFrom": "2026-05-05T10:00:00Z",
+    "source": { "vertical": "rent", "messageId": "msg_1" }
+  }'
+```
+
+В ответе придёт `factId` и исход работы conflict-resolver (`INSERTED` на первом ингесте).
+
+## 2. Найти его
+
+```bash
+curl -X POST "$BRAIN_URL/v1/search" \
+  -H "Authorization: Bearer $BRAIN_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{ "query": "maintenance issues", "limit": 5 }'
+```
+
+Вернёт ранжированные попадания по сущностям с подходящими фактами и разбивкой score по этапам.
+
+## 3. Поднять MCP-клиент
+
+Когда REST заработал, наведи MCP-клиент на тот же ключ. Конфиги под каждый клиент — в [настройке MCP](/ru/docs/mcp/setup).
+
+Трёхстрочная сводка для Claude Desktop:
+
+```json
+{
+  "mcpServers": {
+    "brain": {
+      "url": "https://brain.inite.ai/mcp/<companyId>",
+      "transport": "http",
+      "headers": { "Authorization": "Bearer <api-key>" }
+    }
+  }
+}
+```
+
+## Что читать дальше
+
+- [Битемпоральная модель](/ru/docs/concepts/bitemporal) — почему у каждого факта две оси времени
+- [Словарь предикатов](/ru/docs/concepts/predicates) — строительные блоки фактов
+- [Разрешение конфликтов](/ru/docs/concepts/conflict-resolution) — что происходит, когда два ингеста спорят
+- [POST /v1/search](/ru/docs/api/search) — полная форма запроса и ответа
+- [Справочник MCP-инструментов](/ru/docs/mcp/tools) — шесть инструментов и их Zod-схемы

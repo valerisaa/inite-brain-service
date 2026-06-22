@@ -1,8 +1,3 @@
-export const metadata = {
-  title: 'POST /v1/synthesize · INITE Brain Docs',
-  description: 'Corrective-RAG with strict / lenient / off guardrails plus claim-level faithfulness scorer.',
-}
-
 # POST /v1/synthesize
 
 `/v1/search` + a generator LLM + a verifier LLM. The generator produces a grounded answer with `[factId]` citations; the verifier scores whether each claim is supported by the source facts. Three guardrail modes; `strict` is fail-closed and the default.

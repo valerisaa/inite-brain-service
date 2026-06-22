@@ -1,0 +1,70 @@
+# Битемпоральная модель
+
+Brain хранит каждый факт по двум независимым осям времени. Вместе они отвечают на два разных вопроса:
+
+| Ось | Пара полей | Отвечает на |
+| --- | --- | --- |
+| Valid time | `validFrom` / `validUntil` | «Когда это было правдой в реальном мире?» |
+| Transaction time | `recordedAt` / `retractedAt` | «Когда Brain об этом узнал / когда узнал, что это неверно?» |
+
+Обе оси — первого класса. Можно спросить «какой у Alice был tier 15 марта» (valid time) И «во что Brain верил 1 апреля» (transaction time). Обычный поиск считает обе оси равными «сейчас».
+
+## По умолчанию — «актуально сейчас»
+
+Без `asOf` любое чтение возвращает только факты, чьё окно валидности содержит *сейчас* И в которые Brain верит на данный момент:
+
+```
+validFrom <= now AND (validUntil IS NULL OR validUntil > now)
+AND status NOT IN ('superseded', 'retracted', 'compacted')
+AND (retractedAt IS NULL OR retractedAt > now)
+```
+
+Совпадает с конвенцией Datomic / Zep. Это то, что вызывающему нужно примерно в 95% случаев.
+
+## Передаём `asOf`
+
+```bash
+curl -X POST "$BRAIN_URL/v1/search" \
+  -H "Authorization: Bearer $BRAIN_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query": "Alice tier",
+    "asOf": "2026-03-15T00:00:00Z"
+  }'
+```
+
+Отсечка уходит прямо в WHERE на уровне этапа — никакого пост-фильтра на JS. Дёшево.
+
+## Алгебра интервалов Аллена
+
+Когда два ингеста пересекаются, conflict-resolver классифицирует их отношение:
+
+```
+A:  [─────────]
+B:        [─────────]   → overlap          → решаем по score
+A:  [─────────]
+B:              [───]   → before / after   → оба валидны, конфликта нет
+A:  [─────────]
+B:   [───]              → contains         → решаем по score
+```
+
+Предикаты `single_active` (например, `name`, `email`) запрещают пересечение — новое значение обрезает `validUntil` старого. Предикаты `bitemporal` (например, `status`, `address`) допускают пересечение и идут через скорер. Предикаты `append_only` (например, `said`) не конфликтуют никогда.
+
+## Чтение отозванных строк
+
+`get_entity_timeline` и `GET /v1/entities/:id/timeline` возвращают и отозванные факты — `status: 'retracted'` с `retractedAt` и `retractionReason`. По умолчанию поиск их прячет; запроси явно «что изменилось» / «история», чтобы их увидеть.
+
+Никогда не удаляй отозванный факт. Brain держит аудит-след, чтобы пользователь видел: «раньше мы считали X, потом узнали обратное».
+
+## Подводные камни
+
+- **Залипший `asOf`** — сбрасывай его на следующих ходах, если пользователь не сказал «всё ещё на момент X».
+- **`validUntil` как срок годности** — факт с `validUntil = 2026-04-01` был верен *вплоть до* этого момента. Это битемпорально корректно, а не устарело.
+- **Путаница осей** — «что было верно в марте» (valid time) ≠ «что Brain знал в марте» (transaction time). Для запросов только по transaction time тяни полный timeline и фильтруй на клиенте.
+
+## Связанное
+
+- [Разрешение конфликтов](/ru/docs/concepts/conflict-resolution) — формула скоринга
+- [Словарь предикатов](/ru/docs/concepts/predicates) — single_active vs bitemporal vs append_only
+- [POST /v1/search](/ru/docs/api/search) — параметр `asOf`
+- Скилл `brain-bitemporal` (`~/.claude/skills/brain-bitemporal/`) — краткая инструкция для агента

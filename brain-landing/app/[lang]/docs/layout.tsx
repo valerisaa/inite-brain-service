@@ -30,7 +30,6 @@ export default function DocsLayout({ children }: Props) {
 
   const currentPage = DOCS_PAGES.find((p) => p.slug === currentSlug)
   const { prev, next } = adjacentDocs(currentSlug)
-  const showRuPending = lang === 'ru'
 
   return (
     <div className="min-h-screen bg-[var(--bg)]">
@@ -86,13 +85,7 @@ export default function DocsLayout({ children }: Props) {
             </nav>
           )}
 
-          {showRuPending && currentPage && (
-            <div className="mb-4 px-3 py-2 rounded border border-[var(--border)] bg-[var(--bg-elevated)] text-[12px] text-[var(--text-muted)]">
-              {t.docs.rev['ru-pending']}
-            </div>
-          )}
-
-          <article className="docs-content">{children}</article>
+          {children}
 
           {(prev || next) && (
             <div className="mt-16 pt-6 border-t border-[var(--border)] grid grid-cols-2 gap-4">
