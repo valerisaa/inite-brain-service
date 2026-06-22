@@ -20,6 +20,9 @@ import {
   JobStatus,
   JobType,
 } from '../jobs/job-run.service';
+import { JobClaimService } from '../jobs/job-claim.service';
+import { LeaderLeaseService } from '../jobs/leader-lease.service';
+import { WorkerLoopService } from '../jobs/worker-loop.service';
 import { DreamsService } from '../dreams/dreams.service';
 import { CalibrationRefitService } from '../ai/calibration/calibration-refit.service';
 import { ChangefeedConsumerService } from '../audit/changefeed-consumer.service';
@@ -58,6 +61,9 @@ export class AdminJobsController {
     private readonly apiKeys: ApiKeyService,
     private readonly reindex: ReindexEmbeddingsService,
     private readonly scenarios: ScenarioRunnerService,
+    private readonly claim: JobClaimService,
+    private readonly leaderLease: LeaderLeaseService,
+    private readonly workerLoop: WorkerLoopService,
   ) {}
 
   @Get('jobs')
@@ -463,6 +469,57 @@ export class AdminJobsController {
         identityLinksCreated: identityLinks,
         resolutionsApplied: resolutions,
       },
+    };
+  }
+
+  /**
+   * Leader-election + active-claim cockpit. One screen that answers:
+   *
+   *   - which pod holds each named lease (dreams_all, compaction_*,
+   *     worker_loop, lease_manager_cron, changefeed_consumer …)
+   *   - how long is each lease good for, when was it last heartbeated
+   *   - which job_run rows are CURRENTLY claimed: which pod, attempt,
+   *     leaseUntil, heartbeatAt — surfacing stuck workers before the
+   *     reaper kicks in
+   *   - this pod's role: leader / follower, registered handler types
+   *
+   * Read-only. Cross-tenant scan of running rows is capped at 50 per
+   * tenant inside JobClaimService.listActiveClaims so a noisy tenant
+   * can't crowd the screen.
+   */
+  @Get('leases')
+  @RequireScopes('brain:admin')
+  async leases() {
+    const [leaderLeases, activeClaims] = await Promise.all([
+      this.leaderLease.list(),
+      this.claim.listActiveClaims(this.apiKeys.knownCompanyIds()),
+    ]);
+    const now = Date.now();
+    return {
+      generatedAt: new Date(now).toISOString(),
+      podIdentity: this.claim.identity(),
+      workerLoop: {
+        leader: this.workerLoop.leader(),
+        registeredTypes: this.workerLoop.registeredTypes(),
+      },
+      leaderLeases: leaderLeases.map((row) => {
+        const expiresInMs = Date.parse(row.leaseUntil) - now;
+        return {
+          ...row,
+          expired: expiresInMs < 0,
+          expiresInSeconds: Math.round(expiresInMs / 1000),
+        };
+      }),
+      activeClaims: activeClaims.map((row) => {
+        const leaseInMs = Date.parse(row.leaseUntil) - now;
+        const lastHeartbeatMs = now - Date.parse(row.heartbeatAt);
+        return {
+          ...row,
+          leaseExpired: leaseInMs < 0,
+          leaseExpiresInSeconds: Math.round(leaseInMs / 1000),
+          lastHeartbeatSecondsAgo: Math.round(lastHeartbeatMs / 1000),
+        };
+      }),
     };
   }
 
