@@ -3,6 +3,7 @@ import { AuthModule } from '../auth/auth.module';
 import { JobRunService } from './job-run.service';
 import { JobClaimService } from './job-claim.service';
 import { LeaderLeaseService } from './leader-lease.service';
+import { WorkerLoopService } from './worker-loop.service';
 import { DistributedLeaseGuard } from '../common/distributed-lease.guard';
 
 /**
@@ -30,12 +31,14 @@ import { DistributedLeaseGuard } from '../common/distributed-lease.guard';
     JobRunService,
     JobClaimService,
     LeaderLeaseService,
+    WorkerLoopService,
     DistributedLeaseGuard,
   ],
   exports: [
     JobRunService,
     JobClaimService,
     LeaderLeaseService,
+    WorkerLoopService,
     DistributedLeaseGuard,
   ],
 })
