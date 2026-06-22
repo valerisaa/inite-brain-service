@@ -6,7 +6,7 @@ interface Props {
   lang: Lang
 }
 
-const REPO = 'inite/inite-brain-service'
+const REPO = 'inite-ai/inite-brain-service'
 
 // Tech names aren't localized — they're proper nouns.
 const STACK = [

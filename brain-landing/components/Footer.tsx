@@ -5,7 +5,7 @@ interface Props {
   lang: Lang
 }
 
-const REPO = 'inite/inite-brain-service'
+const REPO = 'inite-ai/inite-brain-service'
 
 export function Footer({ lang }: Props) {
   const t = getMessages(lang)

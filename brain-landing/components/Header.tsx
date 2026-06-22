@@ -13,7 +13,7 @@ interface Props {
   context?: string
 }
 
-const REPO = 'inite/inite-brain-service'
+const REPO = 'inite-ai/inite-brain-service'
 
 /** Live star count, best-effort. Falls back to a plain "Star" CTA. */
 function useStars(): string | null {
