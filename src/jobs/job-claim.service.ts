@@ -1,0 +1,522 @@
+import { Injectable, Logger, Optional } from '@nestjs/common';
+import { hostname } from 'node:os';
+import { randomUUID } from 'node:crypto';
+import {
+  SurrealService,
+  runTransaction,
+  retryOnUniqueViolation,
+  isUniqueViolation,
+} from '../db/surreal.service';
+import type { JobType, JobStatus } from './job-run.service';
+
+export interface JobClaim {
+  /** Surreal record id, e.g. `job_run:abcd1234`. */
+  recordId: string;
+  /** Stable UUID written by enqueue() — surfaces in HTTP responses. */
+  runId: string;
+  jobType: JobType;
+  companyId: string;
+  attempts: number;
+  /** Free-form payload set at enqueue. Handler reads it before dispatch. */
+  payload: Record<string, unknown> | null;
+  /** Lease deadline. Handler MUST renew before this passes. */
+  leaseUntil: string;
+}
+
+/**
+ * JobClaimService — CAS primitives on the `job_run` table.
+ *
+ *   enqueue → pending row (idempotent via dedupKey).
+ *   claimNext → atomic pending→running transition under OCC.
+ *   renew → bump leaseUntil + heartbeatAt while handler runs.
+ *   complete / fail → terminal state, optional requeue with backoff.
+ *   reapZombies → recycle rows whose lease lapsed (worker crashed).
+ *
+ * The actor identity (claimedBy) is `hostname#pid` — same convention
+ * as LeaderLeaseService so an operator can correlate which pod
+ * holds which claim against `/admin/leases`.
+ *
+ * Per-tenant placement: the `job_run` table lives in each tenant's
+ * `co_<companyId>` database (migration 0025). All methods take a
+ * companyId; the WorkerLoopService iterates known tenants and calls
+ * us once per tenant per poll cycle.
+ *
+ * Transient concurrency failures (CAS race, dedup race, OCC commit
+ * abort) propagate as a null return — caller backs off and tries the
+ * next tenant. Hard failures (DB down, malformed SQL) throw so the
+ * loop can log and reschedule with backoff.
+ */
+@Injectable()
+export class JobClaimService {
+  private readonly logger = new Logger(JobClaimService.name);
+  private readonly workerId: string;
+
+  constructor(@Optional() private readonly surreal?: SurrealService) {
+    this.workerId = `${hostname()}#${process.pid}`;
+  }
+
+  identity(): string {
+    return this.workerId;
+  }
+
+  /**
+   * Insert a new pending row. When `dedupKey` collides with an existing
+   * row of the same jobType, returns the existing runId without
+   * creating a duplicate — second cron tick during a leader transition
+   * collapses cleanly.
+   */
+  async enqueue(input: {
+    jobType: JobType;
+    companyId: string;
+    triggeredBy: 'cron' | 'manual' | 'startup';
+    triggeredByActor?: string;
+    dedupKey?: string;
+    payload?: Record<string, unknown>;
+    visibleAfter?: Date;
+  }): Promise<{ runId: string; created: boolean }> {
+    if (!this.surreal) {
+      return { runId: randomUUID(), created: true };
+    }
+    const runId = randomUUID();
+    const visibleAfterIso = (input.visibleAfter ?? new Date()).toISOString();
+    try {
+      const created = await retryOnUniqueViolation(() =>
+        this.surreal!.withCompany(input.companyId, async (db) => {
+          await db.query(
+            `CREATE job_run CONTENT {
+               runId: $runId, jobType: $jobType, status: 'pending',
+               triggeredBy: $triggeredBy, triggeredByActor: $actor,
+               startedAt: time::now(),
+               progress: $payload, payload: $payload,
+               cancelRequested: false,
+               attempts: 0,
+               dedupKey: $dedupKey,
+               visibleAfter: type::datetime($visibleAfter)
+             }`,
+            {
+              runId,
+              jobType: input.jobType,
+              triggeredBy: input.triggeredBy,
+              actor: input.triggeredByActor ?? null,
+              payload: input.payload ?? null,
+              dedupKey: input.dedupKey ?? null,
+              visibleAfter: visibleAfterIso,
+            },
+          );
+          return true;
+        }),
+      );
+      return { runId, created };
+    } catch (e) {
+      // Dedup collision after retries exhausted — fetch the existing row
+      // so the caller can observe (or attach to) the already-queued run.
+      if (isUniqueViolation(e) && input.dedupKey) {
+        const existing = await this.findByDedup(
+          input.companyId,
+          input.jobType,
+          input.dedupKey,
+        );
+        if (existing) return { runId: existing, created: false };
+      }
+      throw e;
+    }
+  }
+
+  /**
+   * Find the oldest pending row for a (companyId, jobType) and CAS it
+   * to running. Returns null when nothing is claimable (queue empty,
+   * scheduled-future, or another pod grabbed it first).
+   */
+  async claimNext(input: {
+    companyId: string;
+    jobType: JobType;
+    ttlSeconds: number;
+  }): Promise<JobClaim | null> {
+    if (!this.surreal) return null;
+    try {
+      return await retryOnUniqueViolation(() =>
+        this.surreal!.withCompany(input.companyId, async (db) => {
+          const claimed = await runTransaction<unknown>(db, (tx) => {
+            tx.bind('jobType', input.jobType)
+              .bind('me', this.workerId)
+              .bind('ttl', input.ttlSeconds)
+              .add(
+                `LET $row = (SELECT * FROM job_run
+                              WHERE jobType = $jobType
+                                AND status = 'pending'
+                                AND visibleAfter <= time::now()
+                              ORDER BY visibleAfter ASC
+                              LIMIT 1)[0]`,
+              )
+              .add(
+                `IF $row IS NONE { RETURN NONE }
+                 ELSE {
+                   LET $updated = (UPDATE $row.id
+                       SET status = 'running',
+                           claimedBy = $me,
+                           claimedAt = time::now(),
+                           leaseUntil = time::now() + duration::from::secs($ttl),
+                           heartbeatAt = time::now(),
+                           attempts = ($row.attempts OR 0) + 1
+                     WHERE status = 'pending'
+                     RETURN AFTER)[0];
+                   RETURN $updated;
+                 }`,
+              );
+          });
+          if (!claimed || typeof claimed !== 'object') return null;
+          const row = claimed as Record<string, unknown>;
+          const recordId = String(row.id ?? '');
+          const runId = String(row.runId ?? '');
+          if (!recordId || !runId) return null;
+          return {
+            recordId,
+            runId,
+            jobType: row.jobType as JobType,
+            companyId: input.companyId,
+            attempts: Number(row.attempts ?? 1),
+            payload: (row.payload as Record<string, unknown> | null) ?? null,
+            leaseUntil: new Date(row.leaseUntil as string).toISOString(),
+          } satisfies JobClaim;
+        }),
+      );
+    } catch (e) {
+      this.logger.warn(
+        `claimNext(${input.companyId}, ${input.jobType}) failed: ${(e as Error).message}`,
+      );
+      return null;
+    }
+  }
+
+  /**
+   * Push the lease forward. Caller must still own the claim — the
+   * `claimedBy = $me` clause guards against renewing someone else's
+   * row after a zombie reap reassigned ownership.
+   */
+  async renew(input: {
+    companyId: string;
+    recordId: string;
+    ttlSeconds: number;
+  }): Promise<{ stillOwned: boolean; cancelRequested: boolean }> {
+    if (!this.surreal) return { stillOwned: true, cancelRequested: false };
+    try {
+      return await this.surreal.withCompany(input.companyId, async (db) => {
+        const [rows] = (await db.query<any[]>(
+          `UPDATE type::thing($rid) SET
+              leaseUntil = time::now() + duration::from::secs($ttl),
+              heartbeatAt = time::now()
+            WHERE claimedBy = $me AND status = 'running'
+            RETURN cancelRequested`,
+          {
+            rid: input.recordId,
+            me: this.workerId,
+            ttl: input.ttlSeconds,
+          },
+        )) as any[];
+        const arr = (rows ?? []) as Array<{ cancelRequested?: boolean }>;
+        if (arr.length === 0) {
+          // Someone reaped us OR we never owned this row.
+          return { stillOwned: false, cancelRequested: false };
+        }
+        return {
+          stillOwned: true,
+          cancelRequested: arr[0]?.cancelRequested === true,
+        };
+      });
+    } catch (e) {
+      this.logger.warn(
+        `renew(${input.recordId}) failed: ${(e as Error).message}`,
+      );
+      return { stillOwned: false, cancelRequested: false };
+    }
+  }
+
+  /**
+   * Terminal success. Frees the claim so a manual re-enqueue with the
+   * same dedupKey can re-run from scratch.
+   */
+  async complete(input: {
+    companyId: string;
+    recordId: string;
+    result?: Record<string, unknown>;
+  }): Promise<void> {
+    if (!this.surreal) return;
+    try {
+      await this.surreal.withCompany(input.companyId, async (db) => {
+        await db.query(
+          `UPDATE type::thing($rid) SET
+              status = 'succeeded',
+              finishedAt = time::now(),
+              result = $result,
+              claimedBy = NONE, leaseUntil = NONE`,
+          {
+            rid: input.recordId,
+            result: input.result ?? null,
+          },
+        );
+      });
+    } catch (e) {
+      this.logger.warn(
+        `complete(${input.recordId}) failed: ${(e as Error).message}`,
+      );
+    }
+  }
+
+  /**
+   * Failure. When `requeue` is true and attempts < maxAttempts, the row
+   * goes back to 'pending' with an exponential-backoff visibleAfter so
+   * a transient failure (rate-limited LLM, surreal hiccup) can retry
+   * naturally. Otherwise terminal-fail.
+   */
+  async fail(input: {
+    companyId: string;
+    recordId: string;
+    attempts: number;
+    error: { message: string; name?: string };
+    requeue?: boolean;
+    maxAttempts?: number;
+    backoffBaseMs?: number;
+  }): Promise<{ requeued: boolean }> {
+    if (!this.surreal) return { requeued: false };
+    const maxAttempts = input.maxAttempts ?? 3;
+    const willRequeue =
+      input.requeue !== false && input.attempts < maxAttempts;
+    try {
+      await this.surreal.withCompany(input.companyId, async (db) => {
+        if (willRequeue) {
+          const baseMs = input.backoffBaseMs ?? 30_000;
+          // Exponential backoff with full jitter; cap at 1h.
+          const backoffMs = Math.min(
+            baseMs * Math.pow(2, input.attempts - 1) *
+              (0.5 + Math.random() * 0.5),
+            3_600_000,
+          );
+          const visibleAfter = new Date(Date.now() + backoffMs).toISOString();
+          await db.query(
+            `UPDATE type::thing($rid) SET
+                status = 'pending',
+                error = $err,
+                claimedBy = NONE, leaseUntil = NONE,
+                visibleAfter = type::datetime($visibleAfter)`,
+            {
+              rid: input.recordId,
+              err: input.error,
+              visibleAfter,
+            },
+          );
+        } else {
+          await db.query(
+            `UPDATE type::thing($rid) SET
+                status = 'failed',
+                finishedAt = time::now(),
+                error = $err,
+                claimedBy = NONE, leaseUntil = NONE`,
+            { rid: input.recordId, err: input.error },
+          );
+        }
+      });
+      return { requeued: willRequeue };
+    } catch (e) {
+      this.logger.warn(
+        `fail(${input.recordId}) failed: ${(e as Error).message}`,
+      );
+      return { requeued: false };
+    }
+  }
+
+  /**
+   * Mark this row as cancelled — handler observed cancelRequested and
+   * exited cleanly. Distinct from fail() because cancellation is not
+   * an error and never requeues.
+   */
+  async cancelled(input: {
+    companyId: string;
+    recordId: string;
+    result?: Record<string, unknown>;
+  }): Promise<void> {
+    if (!this.surreal) return;
+    try {
+      await this.surreal.withCompany(input.companyId, async (db) => {
+        await db.query(
+          `UPDATE type::thing($rid) SET
+              status = 'cancelled',
+              finishedAt = time::now(),
+              result = $result,
+              claimedBy = NONE, leaseUntil = NONE`,
+          { rid: input.recordId, result: input.result ?? null },
+        );
+      });
+    } catch (e) {
+      this.logger.warn(
+        `cancelled(${input.recordId}) failed: ${(e as Error).message}`,
+      );
+    }
+  }
+
+  /**
+   * Find rows whose lease expired while their worker was claimed.
+   * Below maxAttempts → requeue with backoff. At-or-above → terminal
+   * fail with a synthetic 'zombie' error so the operator sees what
+   * happened.
+   *
+   * Runs from LeaseManagerService cron. Caller iterates known tenants.
+   */
+  async reapZombies(input: {
+    companyId: string;
+    maxAttempts?: number;
+    backoffBaseMs?: number;
+  }): Promise<{ requeued: number; failed: number }> {
+    if (!this.surreal) return { requeued: 0, failed: 0 };
+    const maxAttempts = input.maxAttempts ?? 3;
+    const baseMs = input.backoffBaseMs ?? 30_000;
+    try {
+      return await this.surreal.withCompany(input.companyId, async (db) => {
+        // Find expired claims first so we can split into requeue vs fail.
+        const [rows] = (await db.query<any[]>(
+          `SELECT id, attempts, claimedBy FROM job_run
+             WHERE status = 'running' AND leaseUntil < time::now()
+             LIMIT 200`,
+        )) as any[];
+        const arr = (rows ?? []) as Array<{
+          id: string;
+          attempts?: number;
+          claimedBy?: string;
+        }>;
+        let requeued = 0;
+        let failed = 0;
+        for (const row of arr) {
+          const attempts = Number(row.attempts ?? 1);
+          const claimedBy = String(row.claimedBy ?? 'unknown');
+          if (attempts < maxAttempts) {
+            const jitter = 0.5 + Math.random() * 0.5;
+            const backoffMs = Math.min(
+              baseMs * Math.pow(2, attempts - 1) * jitter,
+              3_600_000,
+            );
+            const visibleAfter = new Date(
+              Date.now() + backoffMs,
+            ).toISOString();
+            await db.query(
+              `UPDATE type::thing($rid) SET
+                  status = 'pending',
+                  claimedBy = NONE, leaseUntil = NONE,
+                  visibleAfter = type::datetime($visibleAfter),
+                  error = { message: $msg, name: 'ZombieReclaim' }`,
+              {
+                rid: row.id,
+                visibleAfter,
+                msg: `lease expired while held by ${claimedBy}; requeued (attempt ${attempts}/${maxAttempts})`,
+              },
+            );
+            requeued++;
+          } else {
+            await db.query(
+              `UPDATE type::thing($rid) SET
+                  status = 'failed',
+                  finishedAt = time::now(),
+                  claimedBy = NONE, leaseUntil = NONE,
+                  error = { message: $msg, name: 'ZombieAbandoned' }`,
+              {
+                rid: row.id,
+                msg: `lease expired while held by ${claimedBy}; abandoned after ${attempts} attempt(s)`,
+              },
+            );
+            failed++;
+          }
+        }
+        return { requeued, failed };
+      });
+    } catch (e) {
+      this.logger.warn(
+        `reapZombies(${input.companyId}) failed: ${(e as Error).message}`,
+      );
+      return { requeued: 0, failed: 0 };
+    }
+  }
+
+  /**
+   * Snapshot of currently-claimed rows across tenants — feeds the
+   * /admin/leases panel. Cheap: indexed scan on (status, leaseUntil).
+   */
+  async listActiveClaims(
+    companyIds: readonly string[],
+  ): Promise<
+    Array<{
+      runId: string;
+      jobType: string;
+      companyId: string;
+      claimedBy: string;
+      claimedAt: string;
+      leaseUntil: string;
+      heartbeatAt: string;
+      attempts: number;
+    }>
+  > {
+    if (!this.surreal) return [];
+    const out: Array<{
+      runId: string;
+      jobType: string;
+      companyId: string;
+      claimedBy: string;
+      claimedAt: string;
+      leaseUntil: string;
+      heartbeatAt: string;
+      attempts: number;
+    }> = [];
+    for (const companyId of companyIds) {
+      try {
+        const rows = await this.surreal.withCompany(companyId, async (db) => {
+          const [res] = (await db.query<any[]>(
+            `SELECT runId, jobType, claimedBy, claimedAt, leaseUntil,
+                    heartbeatAt, attempts
+               FROM job_run
+              WHERE status = 'running' AND claimedBy IS NOT NONE
+              ORDER BY claimedAt DESC LIMIT 50`,
+          )) as any[];
+          return (res ?? []) as any[];
+        });
+        for (const r of rows) {
+          out.push({
+            runId: r.runId,
+            jobType: r.jobType,
+            companyId,
+            claimedBy: r.claimedBy,
+            claimedAt: new Date(r.claimedAt).toISOString(),
+            leaseUntil: new Date(r.leaseUntil).toISOString(),
+            heartbeatAt: new Date(r.heartbeatAt).toISOString(),
+            attempts: Number(r.attempts ?? 0),
+          });
+        }
+      } catch (e) {
+        this.logger.warn(
+          `listActiveClaims(${companyId}) failed: ${(e as Error).message}`,
+        );
+      }
+    }
+    return out;
+  }
+
+  private async findByDedup(
+    companyId: string,
+    jobType: JobType,
+    dedupKey: string,
+  ): Promise<string | null> {
+    if (!this.surreal) return null;
+    try {
+      return await this.surreal.withCompany(companyId, async (db) => {
+        const [rows] = (await db.query<any[]>(
+          `SELECT runId FROM job_run
+             WHERE jobType = $jobType AND dedupKey = $dk LIMIT 1`,
+          { jobType, dk: dedupKey },
+        )) as any[];
+        const arr = (rows ?? []) as Array<{ runId?: string }>;
+        return arr[0]?.runId ?? null;
+      });
+    } catch {
+      return null;
+    }
+  }
+}
+
+// Re-export status type for callers that only import JobClaimService.
+export type { JobStatus };
