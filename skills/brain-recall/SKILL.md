@@ -1,11 +1,19 @@
 ---
 name: brain-recall
-description: Recall everything brain knows about one specific entity — current profile, full bitemporal timeline, and graph neighbours. Use when the user names a person/company/thing and asks "tell me about them" or "what's their history".
+description: Recall everything brain knows about one specific entity — current profile, full bitemporal timeline, graph neighbours, and unresolved disagreements. Use when the user names a person/company/thing and asks "tell me about them", "what's their history", or "what do we still disagree about?". For a single-shot LLM briefing without three round-trips, reach for summarize_entity instead.
 ---
 
 # brain-recall
 
-When the user points at one entity and asks for the full picture, combine three MCP tools in order: `get_entity_profile` (now-snapshot) → `get_entity_timeline` (history) → `find_related_entities` (graph context). Each addresses a different question and the user usually wants pieces of all three.
+When the user points at one entity and asks for the full picture, combine MCP tools in order:
+
+- `summarize_entity` (one-liner briefing — drop into LLM context)
+- `get_entity_profile` (now-snapshot — name, refs, active facts)
+- `get_entity_timeline` (history — every fact, including retracted)
+- `find_related_entities` (graph context — typed edges)
+- `get_competing_facts` (unresolved disagreements — pairs the resolver left for adjudication)
+
+Each addresses a different question and the user usually wants pieces of several. The new short-circuit is `summarize_entity` — when the user just wants a single line of context about an entity (not all the facts), it's one call instead of three.
 
 ## When to use
 
@@ -25,6 +33,21 @@ Identifying the entity:
 - If the user gave a brain entity id (`knowledge_entity:01HXYZ...`), pass it directly.
 - If the user named a person/company, call `search_knowledge({ query: "<name>", limit: 3 })` first, pick the top hit's `entity.id`, and confirm with the user if there's ambiguity ("I found two Acmes — Inc and LLC. Which?").
 - If the user gave a vertical+id (`rent.cust_42`), call `get_entity_profile({ entityId: "rent.cust_42" })` — brain resolves the external ref.
+
+### Step 0 — briefing (the cheap path)
+
+If the user just wants context, not the full graph:
+
+```ts
+summarize_entity({
+  entityId: "knowledge_entity:01HXYZ...",
+  styleHint: "neutral", // 'neutral' | 'sales' | 'support'
+})
+```
+
+Returns a one-line briefing — name, type, top 6 most-confident facts, externalRefs. Cached in-process per (entityId, asOf, styleHint), so a hot entity touched across many turns doesn't reload the profile. Use this BEFORE reaching for `get_entity_profile` if all you need is "tell me about them in one breath".
+
+When you do need more than a line, drop down to Step 1.
 
 ### Step 1 — profile (now snapshot)
 
@@ -65,19 +88,33 @@ find_related_entities({
 
 Returns typed edges and the entities on the other side. Useful for "who else is involved" / "what did they touch" / "merged-with" questions. Edge `kind` filter is open-vocabulary — common kinds include `identity_of` (cross-vertical merge), `paid_for`, `mentioned_in`, `manages`, `member_of`.
 
+### Step 4 — competing facts (unresolved disagreements)
+
+```ts
+get_competing_facts({
+  entityId: "knowledge_entity:01HXYZ...",
+  predicate: undefined,         // optional — filter to one predicate
+  asOf: undefined,              // optional — what was competing then
+})
+```
+
+Returns facts in COMPETING status — pairs (or 3+ groups) the conflict resolver couldn't auto-supersede because they overlap in valid-time and are too cosine-close within margin. Use when the timeline shows two conflicting beliefs and you want to surface the disagreement to the user for adjudication. See `brain-conflict` for resolution workflow.
+
 ## Composing a recall
 
 Decide how much to fetch based on the user's question:
 
-| Question shape | Profile | Timeline | Connections |
-| --- | --- | --- | --- |
-| "Tell me about X" (short) | ✓ | — | — |
-| "Full picture on X" | ✓ | ✓ | ✓ |
-| "What changed about X?" | — | ✓ | — |
-| "Who's X connected to?" | ✓ | — | ✓ |
-| "What did we know on April 1?" | ✓ (with `asOf`) | — | — |
+| Question shape | Summarize | Profile | Timeline | Connections | Competing |
+| --- | --- | --- | --- | --- | --- |
+| "Tell me about X" (one line) | ✓ | — | — | — | — |
+| "Tell me about X" (short) | — | ✓ | — | — | — |
+| "Full picture on X" | — | ✓ | ✓ | ✓ | ✓ |
+| "What changed about X?" | — | — | ✓ | — | — |
+| "Who's X connected to?" | — | ✓ | — | ✓ | — |
+| "What did we know on April 1?" | ✓ (with `asOf`) | ✓ (with `asOf`) | — | — | — |
+| "What's still being disagreed about?" | — | — | — | — | ✓ |
 
-Don't always pull all three. Each call is a round-trip; spending one when the user asked for the other is rude.
+Don't always pull all five. Each call is a round-trip; spending one when the user asked for the other is rude.
 
 ## Reading retracted rows
 
@@ -97,4 +134,7 @@ Never lie that the fact never existed. Brain holds the audit trail precisely so 
 ## Companion tools
 
 - `search_knowledge` — when entity isn't yet identified
-- `record_fact` / `retract_fact` — write surface (requires `brain:write`)
+- `search_multi_hop` — when the user's question chains evidence across entities
+- `memory_diff` — when the question is "what changed in the last week / since last conversation?" (see `brain-bitemporal`)
+- `record_fact` / `link_entities` / `retract_fact` — write surface (see `brain-write`)
+- `get_competing_facts` + `detect_contradiction` — adjudication workflow (see `brain-conflict`)

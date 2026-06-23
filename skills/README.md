@@ -1,6 +1,6 @@
 # brain skills bundle
 
-Four Anthropic-format skills that teach an AI agent how to use the INITE
+Six Anthropic-format skills that teach an AI agent how to use the INITE
 Brain service through its MCP endpoint. Bundled into a tarball, installed
 into `~/.claude/skills/` by `install.sh`.
 
@@ -19,10 +19,12 @@ Optional flags:
 
 | Skill | Activates when… | What it does |
 | --- | --- | --- |
-| `brain-search` | The user asks brain to find / look up / search knowledge | Routes through `search_knowledge` with predicate + asOf hints |
-| `brain-recall` | The user asks for an entity's profile, history, or connections | Combines `get_entity_profile` + `get_entity_timeline` + `find_related_entities` |
-| `brain-bitemporal` | The user asks "what did we know on X" / "before Y" | Teaches `asOf` semantics, validFrom/validUntil, retracted-row handling |
-| `brain-mcp-setup` | The user is setting up brain MCP for the first time | Step-by-step config for Claude Desktop, Cursor, Goose |
+| `brain-search` | The user asks brain to find / look up / search knowledge | Routes through `search_knowledge` (+ `search_multi_hop` / `synthesize`) with predicate + asOf hints |
+| `brain-recall` | The user asks for an entity's profile, history, or connections | Combines `summarize_entity` + `get_entity_profile` + `get_entity_timeline` + `find_related_entities` + `get_competing_facts` |
+| `brain-bitemporal` | The user asks "what did we know on X" / "what changed since Y" | Teaches `asOf` semantics, `memory_diff`, validFrom/validUntil, retracted-row handling |
+| `brain-write` | The user wants to record / merge / revise structured knowledge | Routes through `record_fact` / `link_entities` / `retract_fact` with `detect_contradiction` preflight |
+| `brain-conflict` | The user surfaces a disagreement or two facts in COMPETING status | Adjudication workflow via `get_competing_facts` + `detect_contradiction` |
+| `brain-mcp-setup` | The user is setting up brain MCP for the first time | Step-by-step config for Claude Desktop, Cursor, Goose v2, Aider, Continue.dev, n8n, raw SDK |
 
 ## Layout
 
@@ -34,6 +36,8 @@ skills/
 ├── brain-search/SKILL.md
 ├── brain-recall/SKILL.md
 ├── brain-bitemporal/SKILL.md
+├── brain-write/SKILL.md
+├── brain-conflict/SKILL.md
 └── brain-mcp-setup/SKILL.md
 ```
 

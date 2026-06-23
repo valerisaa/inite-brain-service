@@ -97,8 +97,11 @@ If the search needs `email`, `phone`, `dob`, or `address`, the caller must hold 
 
 - `search_multi_hop` — for chained reasoning over multiple entities ("tenants who complained in April AND upgraded after"); set `synthesize: true` to fold the answer in
 - `synthesize` — when the user wants a direct natural-language answer with citations rather than raw search hits; pair with `synthesisGuardrails: 'strict'` when hallucinated answers cost more than null
+- `memory_diff` — for "what changed between two cursors" questions (see `brain-bitemporal`)
+- `summarize_entity` — one-line briefing when full profile is overkill (see `brain-recall`)
 - `get_entity_profile` — when you already have a specific entity in mind
 - `get_entity_timeline` — when you need every fact ever recorded for one entity
+- `get_competing_facts` / `detect_contradiction` — adjudication and preflight (see `brain-conflict`)
 - `find_related_entities` — graph walk from a known node
-- `link_entities` — declare a typed edge (e.g. `identity_of` to merge two records of the same person)
+- `record_fact` / `link_entities` / `retract_fact` — write surface (see `brain-write`)
 - `forget_entity` — GDPR-grade hard cascade; admin scope only

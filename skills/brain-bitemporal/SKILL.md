@@ -1,6 +1,6 @@
 ---
 name: brain-bitemporal
-description: How to query the INITE Brain knowledge graph across time — the asOf parameter, validFrom/validUntil semantics, and how to read retracted facts without confusing the user. Use when the user's question has a temporal dimension ("on X date", "before Y", "what changed").
+description: How to query the INITE Brain knowledge graph across time — the asOf parameter, validFrom/validUntil semantics, reading retracted facts, and the memory_diff "what changed between two cursors" surface. Use when the user's question has a temporal dimension ("on X date", "before Y", "what's new since last conversation").
 ---
 
 # brain-bitemporal
@@ -30,6 +30,33 @@ AND (retractedAt IS NULL OR retractedAt > now)
 ```
 
 This matches the Datomic / Zep convention and is almost always what callers want. If you're not sure whether to pass `asOf`, **don't**.
+
+## "What changed?" — the memory_diff surface
+
+When the user asks **"what's new since last time"** / **"what changed in the last week"** / **"diff between two points in time"**, don't fetch the timeline and diff it yourself — use `memory_diff`:
+
+```ts
+memory_diff({
+  from: "2026-05-15T00:00:00Z",
+  to:   "2026-05-22T00:00:00Z",
+  entityIds: undefined,         // optional — scope to a set of entities
+  predicates: ["status", "tier"], // optional — scope to a predicate family
+})
+```
+
+Returns five buckets for the half-open window `[from, to)`:
+
+- `createdFacts` — net-new active facts (excludes rows that were superseded in-window — those go in changedFacts so consecutive diffs never double-count)
+- `retractedFacts` — pure retracts with no successor
+- `changedFacts` — superseded transitions, each carrying `{ before, after }`
+- `newEntities` — `knowledge_entity.createdAt` in-window
+- `forgottenEntities` — GDPR-erased tombstones in-window
+
+The killer use case: a session-resume agent fetches `memory_diff(lastSessionEnd, now)` and uses the result to brief the user on what brain learned while they were away. Cheaper than re-fetching every relevant profile from scratch.
+
+Consecutive diffs over adjacent windows compose: `diff(T0, T1)` + `diff(T1, T2)` covers `[T0, T2)` without double-counting because the window is half-open.
+
+`asOf` is also available on `search_multi_hop` — the planner threads the cursor through every hop, so a historical multi-hop question (e.g. "what tenants in April had been complaining since March?") works the same way as a single-hop search.
 
 ## When to pass `asOf`
 
@@ -107,6 +134,10 @@ Some predicates are `single_active` (e.g. `name`, `email`, `phone`): there can b
 ## When in doubt
 
 Default to no `asOf`. Brain's "actual now" answers ~95% of agent questions correctly. Reach for `asOf` only when the user's question explicitly contains a date / "before X" / "what did we know" phrasing.
+
+## "When did we first learn this?"
+
+The `recordedAt` axis on `get_entity_timeline` is the transaction-time question. Sorting the timeline by `recordedAt` gives you brain's learning order; sorting by `validFrom` gives the real-world order. They're often different — a fact "valid from 2026-01-01" might be `recordedAt = 2026-05-12` if a backfill landed late.
 
 ## Companion docs
 

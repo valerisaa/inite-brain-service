@@ -1,6 +1,6 @@
 ---
 name: brain-mcp-setup
-description: Walk a developer through connecting a fresh MCP client (Claude Desktop, Cursor, Goose, n8n) to the INITE Brain service. Covers obtaining an API key, the per-tenant URL shape, config snippets, and the smoke test. Use when the user says "add brain MCP", "connect brain to Claude", "set up brain for Cursor".
+description: Walk a developer through connecting a fresh MCP client (Claude Desktop, Cursor, Goose v2, Aider, Continue.dev, n8n, or a raw @modelcontextprotocol/sdk client) to the INITE Brain service. Covers obtaining an API key, the per-tenant URL shape, config snippets per client, the scope matrix for all 14 brain tools, and the smoke test. Use when the user says "add brain MCP", "connect brain to Claude", "set up brain for Cursor", or names any MCP-capable client.
 ---
 
 # brain-mcp-setup
@@ -12,7 +12,7 @@ INITE Brain ships a Streamable HTTP MCP endpoint at `/mcp/:companyId`. Each tena
 1. A **brain API key** for their company (format `brain_<base64>`).
 2. The **companyId** the key was issued for (visible at `https://brain.inite.ai/admin/keys`).
 3. The **MCP URL**: `https://brain.inite.ai/mcp/<companyId>`.
-4. One of: Claude Desktop, Cursor, Goose, n8n.
+4. One of: Claude Desktop, Cursor, Goose v2, Aider, Continue.dev, n8n, or a raw `@modelcontextprotocol/sdk` client.
 
 If they don't have a key yet, point them to `https://brain.inite.ai/admin/keys` and pause. Brain refuses unsigned MCP calls — there's no anonymous mode.
 
@@ -56,7 +56,7 @@ Edit `.cursor/mcp.json` in the user's workspace (or `~/.cursor/mcp.json` for glo
 
 Reload the workspace. Brain tools become available under `@brain` in the AI panel.
 
-## Goose
+## Goose v2
 
 Edit `~/.config/goose/config.yaml`:
 
@@ -68,9 +68,45 @@ extensions:
     headers:
       Authorization: Bearer <api-key>
     enabled: true
+    bundled: false
 ```
 
-`goose session start` will load brain tools.
+`goose session start` will load brain tools. Goose v2 (released Q1 2026) ships with first-class Streamable HTTP support; if you're on a 1.x Goose, the `type` field is `stdio` only and you'll need a stdio shim — upgrade is the cleaner path.
+
+## Aider
+
+Aider gained MCP support in 0.95. Pass the brain URL on the command line:
+
+```bash
+aider --mcp brain.inite.ai/mcp/<companyId> \
+      --mcp-header "Authorization: Bearer <api-key>"
+```
+
+Or in `~/.aider.conf.yml`:
+
+```yaml
+mcp-servers:
+  brain:
+    url: https://brain.inite.ai/mcp/<companyId>
+    headers:
+      Authorization: Bearer <api-key>
+```
+
+## Continue.dev
+
+Edit `~/.continue/config.yaml`:
+
+```yaml
+mcpServers:
+  - name: brain
+    type: streamable-http
+    url: https://brain.inite.ai/mcp/<companyId>
+    requestOptions:
+      headers:
+        Authorization: Bearer <api-key>
+```
+
+Reload the editor. Tools appear in the `@` mention list.
 
 ## n8n
 
@@ -82,23 +118,55 @@ Use the **MCP Client** node in n8n:
 
 Pin a credential so it's reusable across workflows.
 
+## Raw `@modelcontextprotocol/sdk` (custom clients)
+
+For a Node / TS client that talks Streamable HTTP directly:
+
+```ts
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+
+const transport = new StreamableHTTPClientTransport(
+  new URL("https://brain.inite.ai/mcp/<companyId>"),
+  {
+    requestInit: {
+      headers: { Authorization: "Bearer <api-key>" },
+    },
+  }
+);
+
+const client = new Client({ name: "my-agent", version: "1.0.0" });
+await client.connect(transport);
+
+const tools = await client.listTools();
+const out = await client.callTool({
+  name: "search_knowledge",
+  arguments: { query: "hello", limit: 1 },
+});
+```
+
+The brain server is request-scoped: one McpServer per call, no long-lived session state. Streamable HTTP keeps the client → server connection alive but every tool call is independent.
+
 ## Smoke test (any client)
 
 Once the client is connected, ask it:
 
 > List available brain tools and call `search_knowledge` with query `"hello"` limit 1.
 
-Expected: a tool list of either 4 or 6 tools, and a `search_knowledge` call that returns an empty `hits` array on a fresh tenant (or one hit if there's seed data). If the tool call returns a 401 or 403, the API key scope is wrong — go back to `https://brain.inite.ai/admin/keys` and check the key's scopes (`brain:read`, `brain:write`, `brain:read_pii`).
+Expected: a tool list whose count depends on the key's scopes (see matrix below) and a `search_knowledge` call that returns an empty `hits` array on a fresh tenant (or one hit if there's seed data). If the tool call returns a 401 or 403, the API key scope is wrong — go back to `https://brain.inite.ai/admin/keys` and check the key's scopes.
 
 ## Scope matrix
 
 | Scope | Tools unlocked |
 | --- | --- |
-| `brain:read` (always) | `search_knowledge`, `get_entity_profile`, `get_entity_timeline`, `find_related_entities` |
-| `brain:write` | + `record_fact`, `retract_fact` |
-| `brain:read_pii` | unlocks `email` / `phone` / `dob` / `address` object values in read results (predicate stays visible without it) |
+| `brain:read` (always) | `search_knowledge`, `search_multi_hop`, `synthesize`, `memory_diff`, `get_entity_profile`, `get_entity_timeline`, `summarize_entity`, `get_competing_facts`, `detect_contradiction`, `find_related_entities` (10 tools) |
+| `brain:write` | + `record_fact`, `link_entities`, `retract_fact` (3 more = 13 total) |
+| `brain:admin` | + `forget_entity` (1 more = 14 total) |
+| `brain:read_pii` | unlocks `email` / `phone` / `dob` / `address` object values in read results (predicate stays visible without it; no new tool surface) |
 
-A key with only `brain:read` will see four tools, not six — that's the security invariant, not a bug. Tell the user explicitly when their key is read-only so they don't waste time looking for `record_fact`.
+A key with only `brain:read` will see 10 tools, not 14 — that's the security invariant, not a bug. Tell the user explicitly when their key is read-only so they don't waste time looking for `record_fact` / `forget_entity`.
+
+The detailed taxonomy (which tool for which question) lives in the workflow skills — `brain-search`, `brain-recall`, `brain-bitemporal`, `brain-write`, `brain-conflict`.
 
 ## Common failures
 
@@ -112,10 +180,12 @@ A key with only `brain:read` will see four tools, not six — that's the securit
 
 ## After setup
 
-Once connected, point the user at the three workflow skills:
+Once connected, point the user at the workflow skills:
 
 - `brain-search` — finding facts and entities
-- `brain-recall` — pulling one entity's full picture
-- `brain-bitemporal` — when temporal questions come up
+- `brain-recall` — pulling one entity's full picture (profile + timeline + summarize + competing + related)
+- `brain-bitemporal` — temporal questions, including the `memory_diff` "what changed" surface
+- `brain-write` — recording, linking, and retracting (with `detect_contradiction` preflight)
+- `brain-conflict` — adjudicating COMPETING facts and 3+ multi-way disagreements
 
-These describe how to actually *use* the six tools brain exposes, not just how to wire them in.
+These describe how to actually *use* the 14 tools brain exposes, not just how to wire them in.
