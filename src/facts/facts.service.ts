@@ -46,6 +46,37 @@ export interface RetractResult {
   revivedFactIds: string[];
 }
 
+export interface CompetingFactRecord {
+  factId: string;
+  entityId: string;
+  predicate: string;
+  object: string;
+  confidence: number;
+  validFrom: string;
+  validUntil?: string;
+  recordedAt: string;
+  source?: unknown;
+}
+
+export interface CompetingFactGroup {
+  /** Composite key — `${entityId}::${predicate}` for callers to merge groups. */
+  key: string;
+  entityId: string;
+  predicate: string;
+  facts: CompetingFactRecord[];
+}
+
+export interface ListCompetingResult {
+  entityId: string;
+  asOf?: string;
+  /**
+   * Groups, one per (entityId, predicate). Within a group, every fact
+   * was placed at status='competing' by the conflict resolver and is
+   * still unretracted at `asOf` (or now if asOf is omitted).
+   */
+  groups: CompetingFactGroup[];
+}
+
 @Injectable()
 export class FactsService {
   private readonly logger = new Logger(FactsService.name);
@@ -230,10 +261,118 @@ export class FactsService {
   }
 
   /**
+   * List facts in status='competing' for one entity. The conflict
+   * resolver writes facts here whenever two bitemporal facts share a
+   * predicate, overlap in valid-time, and are too cosine-close to
+   * supersede one another within margin. Use for agent-side
+   * adjudication (operator picks the winner) or for surfacing
+   * unresolved disagreements to a human review queue.
+   *
+   * Groups facts by `(entityId, predicate)` — a competing PAIR
+   * (group of 2) is the most common shape; groups of 3+ exist when
+   * the resolver hit a multi-way conflict it refused to auto-pick.
+   *
+   * `asOf` filters to facts that were live at that moment: not
+   * recorded after it, not retracted before it. Omit asOf for "what
+   * is competing right now".
+   */
+  async listCompeting(
+    companyId: string,
+    entityIdRaw: string,
+    opts: {
+      predicate?: string;
+      asOf?: string;
+    } = {},
+  ): Promise<ListCompetingResult> {
+    return this.surreal.withCompany(companyId, async (db) => {
+      const ref = this.normalizeEntityId(entityIdRaw);
+      const asOf = opts.asOf ? new Date(opts.asOf) : null;
+
+      const clauses = [
+        `entityId = type::thing('knowledge_entity', $rid)`,
+        `status = 'competing'`,
+      ];
+      const params: Record<string, unknown> = { rid: ref.id };
+      if (opts.predicate) {
+        clauses.push(`predicate = $predicate`);
+        params.predicate = opts.predicate;
+      }
+      if (asOf) {
+        clauses.push(
+          `recordedAt <= $asOf`,
+          `(retractedAt IS NONE OR retractedAt > $asOf)`,
+        );
+        params.asOf = asOf;
+      } else {
+        clauses.push(`retractedAt IS NONE`);
+      }
+
+      const [rows] = await db.query<any[][]>(
+        `SELECT id, entityId, predicate, object, confidence,
+                validFrom, validUntil, recordedAt, source
+           FROM knowledge_fact
+           WHERE ${clauses.join(' AND ')}
+           ORDER BY predicate ASC, recordedAt ASC`,
+        params,
+      );
+
+      const records: CompetingFactRecord[] = ((rows as any[]) ?? []).map(
+        (r): CompetingFactRecord => ({
+          factId: String(r.id),
+          entityId: String(r.entityId),
+          predicate: String(r.predicate),
+          object: String(r.object),
+          confidence: typeof r.confidence === 'number' ? r.confidence : 0,
+          validFrom: toIso(r.validFrom),
+          validUntil: r.validUntil ? toIso(r.validUntil) : undefined,
+          recordedAt: toIso(r.recordedAt),
+          source: r.source,
+        }),
+      );
+
+      const groupMap = new Map<string, CompetingFactGroup>();
+      for (const f of records) {
+        const key = `${f.entityId}::${f.predicate}`;
+        const existing = groupMap.get(key);
+        if (existing) {
+          existing.facts.push(f);
+        } else {
+          groupMap.set(key, {
+            key,
+            entityId: f.entityId,
+            predicate: f.predicate,
+            facts: [f],
+          });
+        }
+      }
+
+      return {
+        entityId: `knowledge_entity:${ref.id}`,
+        asOf: asOf ? asOf.toISOString() : undefined,
+        groups: Array.from(groupMap.values()),
+      };
+    });
+  }
+
+  /**
    * Accept either `<id>` or `knowledge_fact:<id>` as the URL path parameter.
    */
   private normalizeFactId(raw: string): { id: string; full: string } {
     const id = raw.startsWith('knowledge_fact:') ? raw.slice('knowledge_fact:'.length) : raw;
     return { id, full: `knowledge_fact:${id}` };
   }
+
+  private normalizeEntityId(raw: string): { id: string; full: string } {
+    const id = raw.startsWith('knowledge_entity:')
+      ? raw.slice('knowledge_entity:'.length)
+      : raw;
+    return { id, full: `knowledge_entity:${id}` };
+  }
+}
+
+function toIso(value: unknown): string {
+  if (value instanceof Date) return value.toISOString();
+  if (typeof value === 'string') return value;
+  if (typeof value === 'number') return new Date(value).toISOString();
+  return new Date().toISOString();
 }

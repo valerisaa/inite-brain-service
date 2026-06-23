@@ -36,7 +36,13 @@ export class McpService {
       name: 'inite-brain-service',
       version: '0.1.0',
     });
-    this.registerReadTools(server, companyId, scopes);
+    // Read surface is split across two helpers — buildServer hits
+    // eslint's max-lines-per-function (200) otherwise. Group A is the
+    // query-shaped tools (search_knowledge / search_multi_hop /
+    // synthesize); group B is the entity-shaped ones (profile /
+    // timeline / competing / related).
+    this.registerSearchTools(server, companyId, scopes);
+    this.registerEntityReadTools(server, companyId, scopes);
     if (scopes.includes('brain:write')) {
       this.registerWriteTools(server, companyId);
     }
@@ -46,8 +52,8 @@ export class McpService {
     return server;
   }
 
-   
-  private registerReadTools(
+
+  private registerSearchTools(
     server: McpServer,
     companyId: string,
     scopes: BrainScope[],
@@ -77,55 +83,6 @@ export class McpService {
             asOf: args.asOf,
             minConfidence: args.minConfidence,
           },
-          scopes,
-        );
-        return {
-          content: [{ type: 'text', text: JSON.stringify(out, null, 2) }],
-          structuredContent: out as any,
-        };
-      },
-    );
-
-    // ── get_entity_profile ────────────────────────────────────────────
-    server.registerTool(
-      'get_entity_profile',
-      {
-        title: 'Get entity profile',
-        description:
-          'Full profile of one entity: canonical name, type, externalRefs (cross-vertical ids), and active facts. Use externalRefs to rehydrate fresh state from the originating vertical via @inite/api-kit.',
-        inputSchema: {
-          entityId: z.string().describe('Brain entity id (knowledge_entity:...) or short id'),
-          asOf: z.string().datetime().optional(),
-        },
-      },
-      async (args) => {
-        const out = await this.entities.getProfile(companyId, args.entityId, args.asOf, scopes);
-        return {
-          content: [{ type: 'text', text: JSON.stringify(out, null, 2) }],
-          structuredContent: out as any,
-        };
-      },
-    );
-
-    // ── get_entity_timeline ───────────────────────────────────────────
-    server.registerTool(
-      'get_entity_timeline',
-      {
-        title: 'Get entity timeline',
-        description:
-          'Chronological audit of all facts brain has learned about this entity, including retracted ones. Useful for "what did we know when" investigations.',
-        inputSchema: {
-          entityId: z.string(),
-          since: z.string().datetime().optional(),
-          until: z.string().datetime().optional(),
-        },
-      },
-      async (args) => {
-        const out = await this.entities.getTimeline(
-          companyId,
-          args.entityId,
-          args.since,
-          args.until,
           scopes,
         );
         return {
@@ -230,6 +187,96 @@ export class McpService {
       },
     );
 
+  }
+
+  private registerEntityReadTools(
+    server: McpServer,
+    companyId: string,
+    scopes: BrainScope[],
+  ): void {
+    // ── get_entity_profile ────────────────────────────────────────────
+    server.registerTool(
+      'get_entity_profile',
+      {
+        title: 'Get entity profile',
+        description:
+          'Full profile of one entity: canonical name, type, externalRefs (cross-vertical ids), and active facts. Use externalRefs to rehydrate fresh state from the originating vertical via @inite/api-kit.',
+        inputSchema: {
+          entityId: z.string().describe('Brain entity id (knowledge_entity:...) or short id'),
+          asOf: z.string().datetime().optional(),
+        },
+      },
+      async (args) => {
+        const out = await this.entities.getProfile(companyId, args.entityId, args.asOf, scopes);
+        return {
+          content: [{ type: 'text', text: JSON.stringify(out, null, 2) }],
+          structuredContent: out as any,
+        };
+      },
+    );
+
+    // ── get_entity_timeline ───────────────────────────────────────────
+    server.registerTool(
+      'get_entity_timeline',
+      {
+        title: 'Get entity timeline',
+        description:
+          'Chronological audit of all facts brain has learned about this entity, including retracted ones. Useful for "what did we know when" investigations.',
+        inputSchema: {
+          entityId: z.string(),
+          since: z.string().datetime().optional(),
+          until: z.string().datetime().optional(),
+        },
+      },
+      async (args) => {
+        const out = await this.entities.getTimeline(
+          companyId,
+          args.entityId,
+          args.since,
+          args.until,
+          scopes,
+        );
+        return {
+          content: [{ type: 'text', text: JSON.stringify(out, null, 2) }],
+          structuredContent: out as any,
+        };
+      },
+    );
+
+    // ── get_competing_facts ───────────────────────────────────────────
+    server.registerTool(
+      'get_competing_facts',
+      {
+        title: 'List competing facts for an entity',
+        description:
+          "Returns facts in COMPETING status — those the conflict resolver couldn't auto-supersede because two same-predicate bitemporal facts overlap in valid-time and are too cosine-close within margin. Grouped by (entityId, predicate); 2-fact groups are pairs the resolver left for adjudication, 3+-fact groups are multi-way disagreements escalated for human review. Use as preflight before record_fact (\"is this entity already conflicted on this predicate?\") or to drive an in-product reviewer queue. asOf filters to disagreements that were live at that moment.",
+        inputSchema: {
+          entityId: z
+            .string()
+            .describe('Brain entity id (knowledge_entity:...) or short id'),
+          predicate: z
+            .string()
+            .optional()
+            .describe('Filter to one predicate (e.g. "status", "address")'),
+          asOf: z
+            .string()
+            .datetime()
+            .optional()
+            .describe('Show what was competing at this ISO 8601 moment'),
+        },
+      },
+      async (args) => {
+        const out = await this.facts.listCompeting(companyId, args.entityId, {
+          predicate: args.predicate,
+          asOf: args.asOf,
+        });
+        return {
+          content: [{ type: 'text', text: JSON.stringify(out, null, 2) }],
+          structuredContent: out as any,
+        };
+      },
+    );
+
     // ── find_related_entities ─────────────────────────────────────────
     server.registerTool(
       'find_related_entities',
@@ -257,10 +304,9 @@ export class McpService {
         };
       },
     );
-
   }
 
-   
+
   private registerWriteTools(server: McpServer, companyId: string): void {
     {
       // ── record_fact ────────────────────────────────────────────────

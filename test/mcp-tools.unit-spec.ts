@@ -49,6 +49,7 @@ const READ_BASELINE = [
   'synthesize',
   'get_entity_profile',
   'get_entity_timeline',
+  'get_competing_facts',
   'find_related_entities',
 ];
 
