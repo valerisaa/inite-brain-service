@@ -29,6 +29,10 @@ which file the bits used to live in.
 | [Operator playbook](operator-playbook.md) | Issue an ApiKey, troubleshoot ingest / search, run a GDPR forget, drain a stuck queue. |
 | [Deploy runbook](DEPLOY.md) | Production deploy — Traefik, GitHub Actions, rollback. |
 
+## Roadmap
+
+- [MCP + memory next steps](roadmap/mcp-and-memory.md) — planned work: memory_diff / procedural memory / MCP resources / ClaudeMcpAgent + full LoCoMo run
+
 ## Cross-cutting
 
 - [License](../LICENSE) — AGPL-3.0-or-later
