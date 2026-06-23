@@ -24,6 +24,11 @@ import { McpService } from '../src/mcp/mcp.service';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { BrainScope } from '../src/auth/api-key.types';
 
+const stubEmbedder = {
+  cacheStats: () => ({ provider: 'openai:text-embedding-3-small' }),
+  getDimensions: () => 1536,
+};
+
 function buildWithScopes(scopes: BrainScope[]): McpServer {
   const svc = new McpService(
     {} as never,
@@ -35,6 +40,7 @@ function buildWithScopes(scopes: BrainScope[]): McpServer {
     {} as never,
     {} as never,
     {} as never,
+    stubEmbedder as never,
   );
   return svc.buildServer('co_test', scopes);
 }
@@ -89,5 +95,35 @@ describe('McpService.buildServer — scope-gated tool surface', () => {
       buildWithScopes(['brain:read', 'brain:write', 'brain:admin']),
     );
     expect(names).toContain('forget_entity');
+  });
+});
+
+describe('McpService.health — unauthenticated probe payload', () => {
+  it('returns ok, version, the read-baseline tools, and embedder hint', () => {
+    const svc = new McpService(
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      stubEmbedder as never,
+    );
+    const health = svc.health();
+    expect(health.ok).toBe(true);
+    expect(health.version).toMatch(/^\d+\.\d+\.\d+$/);
+    for (const t of READ_BASELINE) {
+      expect(health.tools).toContain(t);
+    }
+    // Write- and admin-only tools must NOT leak through the unauth
+    // probe — the brain:write / brain:admin gates are the wire's only
+    // line of defence; surfacing them in /health would tell a probe
+    // exactly what it doesn't have permission to call.
+    expect(health.tools).not.toContain('record_fact');
+    expect(health.tools).not.toContain('forget_entity');
+    expect(health.embedder).toBe('openai:text-embedding-3-small (1536d)');
   });
 });

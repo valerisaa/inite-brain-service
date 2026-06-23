@@ -2,6 +2,7 @@ import {
   All,
   BadRequestException,
   Controller,
+  Get,
   Param,
   Req,
   Res,
@@ -15,9 +16,31 @@ import { McpService } from './mcp.service';
 import { AuthenticatedRequest } from '../auth/api-key.types';
 
 @Controller('mcp')
-@UseGuards(ApiKeyGuard)
 export class McpController {
   constructor(private readonly mcp: McpService) {}
+
+  /**
+   * Unauthenticated health probe. Returns {ok, version, tools[]} —
+   * the read-baseline tool surface, so a setup script can verify the
+   * MCP endpoint is reachable BEFORE the operator pastes the API key.
+   *
+   * Intentionally no `companyId` validation here either — a probe
+   * from a misconfigured client should get a structured response,
+   * not 400. The full handler retains the `pathCompanyId === auth.
+   * companyId` invariant.
+   *
+   * We don't reveal tools gated on brain:write or brain:admin —
+   * downstream operators can confirm those exist by hitting the
+   * authenticated MCP endpoint with the right scope.
+   */
+  @Get(':companyId/health')
+  health(): {
+    ok: boolean;
+    version: string;
+    tools: string[];
+  } {
+    return this.mcp.health();
+  }
 
   /**
    * Per-tenant MCP Streamable HTTP endpoint.
@@ -40,6 +63,7 @@ export class McpController {
   // for them while still capping the OpenAI-bound calls well below 120.
   @Throttle({ expensive: { limit: 30, ttl: 60_000 } })
   @All(':companyId')
+  @UseGuards(ApiKeyGuard)
   @RequireScopes('brain:read')
   async handle(
     @Req() req: AuthenticatedRequest & Request,

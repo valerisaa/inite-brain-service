@@ -10,7 +10,23 @@ import { SynthesizeService } from '../synthesize/synthesize.service';
 import { MemoryDiffService } from '../diff/memory-diff.service';
 import { IngestPredictionService } from '../ingest/ingest-predictor.service';
 import { SummarizeEntityService } from '../summarize-entity/summarize-entity.service';
+import { EmbedderService } from '../ai/embedder.service';
 import { BrainScope } from '../auth/api-key.types';
+
+const MCP_SERVER_VERSION = '0.3.0';
+
+const HEALTH_TOOLS = [
+  'search_knowledge',
+  'search_multi_hop',
+  'synthesize',
+  'memory_diff',
+  'get_entity_profile',
+  'get_entity_timeline',
+  'summarize_entity',
+  'get_competing_facts',
+  'detect_contradiction',
+  'find_related_entities',
+];
 
 /**
  * Builds an MCP server instance bound to a single tenant + scope set.
@@ -40,7 +56,39 @@ export class McpService {
     private readonly memoryDiff: MemoryDiffService,
     private readonly predictor: IngestPredictionService,
     private readonly summarizer: SummarizeEntityService,
+    private readonly embedder: EmbedderService,
   ) {}
+
+  /**
+   * Unauthenticated health probe payload — surfaces version + the
+   * read-baseline tool list so setup scripts can confirm the MCP
+   * endpoint is reachable BEFORE the operator pastes the API key.
+   * Write- and admin-scoped tools are NOT listed; callers verify those
+   * exist by hitting the authenticated endpoint with the right scope.
+   */
+  health(): { ok: boolean; version: string; tools: string[]; embedder: string } {
+    return {
+      ok: true,
+      version: MCP_SERVER_VERSION,
+      tools: HEALTH_TOOLS,
+      embedder: this.embedderDescription(),
+    };
+  }
+
+  /**
+   * Short human-readable embedding-model hint surfaced in MCP tool
+   * descriptions + the health probe. The reverse — picking which
+   * embedder a tenant uses based on the description string — is NOT
+   * supported; this is purely informational.
+   */
+  private embedderDescription(): string {
+    try {
+      const stats = this.embedder.cacheStats();
+      return `${stats.provider} (${this.embedder.getDimensions()}d)`;
+    } catch {
+      return 'unknown';
+    }
+  }
 
   buildServer(companyId: string, scopes: BrainScope[]): McpServer {
     const server = new McpServer({
@@ -69,13 +117,16 @@ export class McpService {
     companyId: string,
     scopes: BrainScope[],
   ): void {
+    const embedderHint = ` Embedding model on this tenant: ${this.embedderDescription()}.`;
+
     // ── search_knowledge ──────────────────────────────────────────────
     server.registerTool(
       'search_knowledge',
       {
         title: 'Search company knowledge',
         description:
-          'Semantic search over the company knowledge graph. Returns entities with their top facts and external references back to the originating verticals. Apply asOf for historical "what did we know on X" queries.',
+          'Semantic search over the company knowledge graph. Returns entities with their top facts and external references back to the originating verticals. Apply asOf for historical "what did we know on X" queries.' +
+          embedderHint,
         inputSchema: {
           query: z.string().describe('Natural-language query'),
           limit: z.number().int().min(1).max(50).optional().describe('Max results (default 10)'),
@@ -109,7 +160,8 @@ export class McpService {
       {
         title: 'Multi-hop search across the knowledge graph',
         description:
-          'Planner-LLM decomposes the query into ≤ maxHops anchored sub-queries; later hops are anchored to the running entity set so the engine never spends compute on candidates already disqualified. Use for questions that combine evidence across turns / sessions, or that require reasoning over multiple entities ("tenants who complained in April AND upgraded after"). Set synthesize=true to get a grounded answer with citations alongside the per-hop trace. Returns finalEntityIds + supportingFactIds (HotpotQA-style evidence chain) so the caller can audit which facts drove the answer.',
+          'Planner-LLM decomposes the query into ≤ maxHops anchored sub-queries; later hops are anchored to the running entity set so the engine never spends compute on candidates already disqualified. Use for questions that combine evidence across turns / sessions, or that require reasoning over multiple entities ("tenants who complained in April AND upgraded after"). Set synthesize=true to get a grounded answer with citations alongside the per-hop trace. Returns finalEntityIds + supportingFactIds (HotpotQA-style evidence chain) so the caller can audit which facts drove the answer.' +
+          embedderHint,
         inputSchema: {
           query: z.string().describe('Natural-language query'),
           maxHops: z.number().int().min(1).max(5).optional().describe(
@@ -163,7 +215,8 @@ export class McpService {
       {
         title: 'Synthesize a grounded answer from retrieved facts',
         description:
-          'Runs hybrid search then feeds the retrieved facts to a generator LLM that produces a citation-bearing answer (each claim ends with [factId]); a verifier LLM then judges whether every claim is supported. Three guardrail modes: strict (default) returns null on partial / unsupported / verifier outage (fail-closed); lenient returns the answer alongside the verifier verdict; off skips the verifier. Use when you need a direct natural-language answer rather than raw search results.',
+          'Runs hybrid search then feeds the retrieved facts to a generator LLM that produces a citation-bearing answer (each claim ends with [factId]); a verifier LLM then judges whether every claim is supported. Three guardrail modes: strict (default) returns null on partial / unsupported / verifier outage (fail-closed); lenient returns the answer alongside the verifier verdict; off skips the verifier. Use when you need a direct natural-language answer rather than raw search results.' +
+          embedderHint,
         inputSchema: {
           query: z.string().describe('Natural-language question'),
           limit: z.number().int().min(1).max(50).optional().describe(
